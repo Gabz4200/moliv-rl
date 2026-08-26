@@ -68,6 +68,13 @@ instance/
 # Scrapy stuff:
 .scrapy
 
+# ai stuff (I use for making commits and some smaller stuff, repo is still mainly human written)
+.aislop/
+.agents/
+.opencode/
+.mimocode/
+AGENTS.md
+
 # Sphinx documentation
 docs/_build/
 
@@ -156,6 +163,16 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# PyTorch artifacts
+checkpoints/
+results/
+/data/
+*.pth
+*.pt
+*.onnx
+runs/
+.tensorboard/
 
 # Spyder project settings
 .spyderproject

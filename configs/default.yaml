@@ -1,0 +1,48 @@
+# Still needs to be wired.
+
+project:
+  name: "moliv_rl"
+  seed: 42069
+
+paths:
+  data_dir: "data"
+  checkpoint_dir: "checkpoints"
+  results_dir: "results"
+
+data:
+  train_split: "train"
+  validation_split: "val"
+  image_size: 64
+  resize_scale: 1.15
+  batch_size: 32
+  num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+
+model:
+  num_classes: 10
+
+optimizer:
+  name: "adamw"
+  learning_rate: 0.001
+  weight_decay: 0.0001
+
+scheduler:
+  name: "cosine_annealing"
+  interval: "epoch"
+  eta_min: 0.0
+
+loss:
+  name: "cross_entropy"
+  label_smoothing: 0.0
+
+training:
+  epochs: 10
+  gradient_accumulation_steps: 1
+  use_amp: false
+  precision_average: "macro"
+
+runtime:
+  device: "auto"
+  save_best: true
+  save_last: true

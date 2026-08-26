@@ -1,0 +1,43 @@
+[project]
+name = "moliv-rl"
+version = "0.1.0"
+description = "An experiment of an autonomous game-playing agent powered by a MobileNet-inspired architecture and LiV, trained using a hybrid approach combining imitation and reinforcement learning."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+    { name = "Gabriel Amaral"}
+]
+dependencies = [
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "torchao",
+    "numpy",
+    "pillow",
+    "tqdm",
+    "tensorboard",
+    "hydra-core",
+    "omegaconf",
+    "pytest",
+    "black",
+    "ruff",
+    "pyrefly",
+    "matplotlib>=3.11.1",
+    "einops>=0.8.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# CPU wheel index for local machine (avoids 2GB+ CUDA download)
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
+torchao = { index = "pytorch-cpu" }

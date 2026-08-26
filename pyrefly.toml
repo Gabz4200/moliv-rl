@@ -1,0 +1,41 @@
+# pyrefly.toml
+# Pyrefly configuration for the moliv_rl research project.
+
+python-version = "3.13"
+python-platform = "linux"
+
+project-includes = [
+    "src",
+    "scripts",
+    "tests",
+]
+
+project-excludes = [
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "**/.mypy_cache/**",
+    "**/.ruff_cache/**",
+    "**/.venv/**",
+    "**/venv/**",
+    "**/build/**",
+    "**/dist/**",
+    "**/*.egg-info/**",
+    "experiments/**",
+    "checkpoints/**",
+    "data/**",
+]
+
+search-path = [
+    "src",
+]
+
+disable-project-excludes-heuristics = true
+
+pytorch-efficiency-lints = true
+
+enabled-ignores = [
+    "pyrefly",
+    "type",
+    "pyright",
+    "mypy",
+]

@@ -1,0 +1,7 @@
+{
+  "python.pyrefly.disabledLanguageServices": {
+    "inlayHint": true
+  },
+  "python.analysis.inlayHints.variableTypes.enabled": false,
+  "python.analysis.inlayHints.functionReturnTypes.enabled": false
+}

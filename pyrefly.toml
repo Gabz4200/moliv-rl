@@ -23,14 +23,18 @@ project-excludes = [
     "experiments/**",
     "checkpoints/**",
     "data/**",
+    "results/**",
 ]
 
 search-path = [
     "src",
+    ".",
 ]
 
+enable-fallback-search-path = true
 disable-project-excludes-heuristics = true
 
+# PyTorch efficiency linter flags GPU sync points (e.g. .item() calls)
 pytorch-efficiency-lints = true
 
 enabled-ignores = [

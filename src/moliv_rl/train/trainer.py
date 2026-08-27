@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import torch
 from torch import nn
@@ -119,9 +119,10 @@ class ClassificationTrainer:
             is_last_batch = batch_idx + 1 == num_loader_batches
             should_step = accumulation_count + 1 >= grad_accum_steps or is_last_batch
 
-            sync_context = nullcontext()
-            if not should_step and hasattr(self.model, "no_sync"):
-                sync_context = self.model.no_sync()
+            sync_context: Any = nullcontext()
+            no_sync = getattr(self.model, "no_sync", None)
+            if not should_step and callable(no_sync):
+                sync_context = no_sync()
 
             with sync_context:
                 with self._autocast():
@@ -129,7 +130,11 @@ class ClassificationTrainer:
                     loss = self.criterion(outputs, targets)
                     scaled_loss = loss / grad_accum_steps
 
-                self.scaler.scale(scaled_loss).backward()
+                scaled = self.scaler.scale(scaled_loss)
+                if isinstance(scaled, torch.Tensor):
+                    scaled.backward()
+                else:
+                    cast(torch.Tensor, scaled).backward()
 
             accumulation_count += 1
             num_batches += 1
@@ -239,14 +244,21 @@ class ClassificationTrainer:
         outputs = torch.cat(all_outputs, dim=0)
         targets = torch.cat(all_targets, dim=0)
 
-        metrics = {
+        val_precision = calculate_precision(
+            outputs,
+            targets,
+            average=precision_average,
+        )
+        val_precision_val = (
+            float(val_precision)
+            if isinstance(val_precision, (int, float))
+            else float(val_precision.item())
+        )
+
+        metrics: dict[str, float] = {
             "val_loss": total_loss / total_samples,
             "val_acc": calculate_accuracy(outputs, targets),
-            "val_precision": calculate_precision(
-                outputs,
-                targets,
-                average=precision_average,
-            ),
+            "val_precision": val_precision_val,
         }
 
         self.logger.info(

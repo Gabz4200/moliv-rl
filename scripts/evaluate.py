@@ -3,23 +3,61 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import torch
-from moliv_rl.metrics.metrics import PrecisionAverage
+import yaml
 from torch import nn
 from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 
 from moliv_rl.data.transforms import get_val_transforms
+from moliv_rl.metrics import PrecisionAverage
 from moliv_rl.models.my_model import MyModel
 from moliv_rl.train.trainer import ClassificationTrainer
 from moliv_rl.utils.logger import get_logger
 
 
+def load_config(config_path: Path | str | None) -> dict[str, Any]:
+    """Load configuration from a YAML file if present."""
+    if config_path is None:
+        return {}
+
+    path = Path(config_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    return data or {}
+
+
 def parse_args() -> argparse.Namespace:
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/default.yaml"),
+        help="Path to YAML configuration file.",
+    )
+    known_args, _ = config_parser.parse_known_args()
+
+    cfg: dict[str, Any] = {}
+    if known_args.config and known_args.config.is_file():
+        cfg = load_config(known_args.config)
+    elif known_args.config and known_args.config != Path("configs/default.yaml"):
+        raise FileNotFoundError(f"Config file not found: {known_args.config}")
+
+    paths_cfg = cfg.get("paths", {})
+    data_cfg = cfg.get("data", {})
+    model_cfg = cfg.get("model", {})
+    training_cfg = cfg.get("training", {})
+    runtime_cfg = cfg.get("runtime", {})
+
     parser = argparse.ArgumentParser(
-        description="Evaluate a moliv_rl classification checkpoint."
+        description="Evaluate a moliv_rl classification checkpoint.",
+        parents=[config_parser],
     )
     parser.add_argument(
         "--checkpoint",
@@ -30,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("data"),
+        default=Path(paths_cfg.get("data_dir", "data")),
         help="Directory containing split subdirectories.",
     )
     parser.add_argument(
@@ -42,42 +80,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=32,
+        default=data_cfg.get("batch_size", 32),
         help="Evaluation batch size.",
     )
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=0,
+        default=data_cfg.get("num_workers", 0),
         help="Number of DataLoader worker processes.",
     )
     parser.add_argument(
         "--num-classes",
         type=int,
-        default=10,
+        default=model_cfg.get("num_classes", 10),
         help="Number of output classes in MyModel.",
     )
     parser.add_argument(
         "--image-size",
         type=int,
-        default=64,
+        default=data_cfg.get("image_size", 64),
         help="Input image size expected by the model.",
     )
     parser.add_argument(
         "--precision-average",
         choices=("micro", "macro", "weighted"),
-        default="macro",
+        default=training_cfg.get("precision_average", "macro"),
         help="Averaging strategy for validation precision.",
     )
     parser.add_argument(
         "--device",
         type=str,
-        default=None,
+        default=runtime_cfg.get("device", "auto"),
         help="Compute device, for example cpu, cuda, cuda:0, or mps.",
     )
     parser.add_argument(
         "--use-amp",
         action="store_true",
+        default=training_cfg.get("use_amp", False),
         help="Use CUDA automatic mixed precision during evaluation.",
     )
     parser.add_argument(
@@ -93,13 +132,25 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_device(device: str | None) -> torch.device:
-    if device is not None:
-        return torch.device(device)
+    if device is not None and device != "auto":
+        resolved = torch.device(device)
+
+        if resolved.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested but is not available")
+
+        if resolved.type == "mps":
+            if not hasattr(torch.backends, "mps"):
+                raise RuntimeError("MPS is not available in this PyTorch build")
+
+            if not torch.backends.mps.is_available():
+                raise RuntimeError("MPS was requested but is not available")
+
+        return resolved
 
     if torch.cuda.is_available():
         return torch.device("cuda")
 
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    if torch.backends.mps.is_available():
         return torch.device("mps")
 
     return torch.device("cpu")

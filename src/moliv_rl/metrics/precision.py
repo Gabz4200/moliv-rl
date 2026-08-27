@@ -45,7 +45,7 @@ def calculate_precision(
                 dtype=torch.float32,
                 device=outputs.device,
             )
-        return float(zero_division)
+        return zero_division
 
     if targets.min().item() < 0 or targets.max().item() >= num_classes:
         raise ValueError(
@@ -98,7 +98,7 @@ def calculate_precision(
         total_predicted_positives = predicted_positives.sum()
 
         if total_predicted_positives == 0:
-            return float(zero_division)
+            return zero_division
 
         return float((total_true_positives / total_predicted_positives).item())
 
@@ -107,7 +107,7 @@ def calculate_precision(
 
     total_support = support.sum()
     if total_support == 0:
-        return float(zero_division)
+        return zero_division
 
     weighted_precision = (per_class_precision * support).sum() / total_support
 

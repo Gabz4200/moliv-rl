@@ -73,7 +73,7 @@ class FocalLoss(nn.Module):
             self.alpha = None
             self.alpha_scalar = float(alpha) if alpha is not None else None
 
-        self.gamma = float(gamma)
+        self.gamma = gamma
         self.reduction = reduction
         self.ignore_index = ignore_index
         self.label_smoothing = label_smoothing

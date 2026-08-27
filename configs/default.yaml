@@ -1,4 +1,4 @@
-# Still needs to be wired.
+# Default training and evaluation configuration for moliv_rl.
 
 project:
   name: "moliv_rl"

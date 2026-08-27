@@ -20,7 +20,17 @@ data:
   persistent_workers: true
 
 model:
+  name: "classification_model"
+  block_dims:
+    - 32
+    - 64
+    - 128
+  in_channels: 3
+  out_channels: 512
+  patch_size: 8
+  dropout: 0.2
   num_classes: 10
+  optimize: false
 
 optimizer:
   name: "adamw"

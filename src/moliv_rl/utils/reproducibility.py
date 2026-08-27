@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import random
 
@@ -17,11 +19,8 @@ def set_seeds(seed: int = 42069, deterministic: bool = True) -> None:
 
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-        if deterministic:
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-        else:
-            torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = bool(deterministic)
+        torch.backends.cudnn.benchmark = not deterministic
 
 
 def seed_worker(_worker_id: int) -> None:

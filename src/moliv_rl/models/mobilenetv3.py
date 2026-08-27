@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 
 import torch
@@ -113,8 +115,10 @@ class InvertedResidual(nn.Module):
         nl: str,
     ):
         super().__init__()
-        assert stride in [1, 2], "stride must be 1 or 2"
-        assert kernel in [3, 5], "kernel must be 3 or 5 for MobileNetV3"
+        if stride not in (1, 2):
+            raise ValueError(f"stride must be 1 or 2, got {stride}")
+        if kernel not in (3, 5):
+            raise ValueError(f"kernel must be 3 or 5 for MobileNetV3, got {kernel}")
 
         self.use_res_connect = stride == 1 and in_channels == out_channels
 
@@ -169,9 +173,7 @@ class InvertedResidual(nn.Module):
         out = self.project(out)
 
         # Add residual connection if shapes match and stride == 1
-        if self.use_res_connect:
-            return x + out
-        return out
+        return x + out if self.use_res_connect else out
 
 
 # Configs extracted from Tables 1 & 2 of the paper MobileNetV3 [https://arxiv.org/pdf/1905.02244](https://arxiv.org/pdf/1905.02244)
@@ -213,13 +215,10 @@ CFG_SMALL: list[tuple[int, int, int, bool, str, int]] = [
 
 
 def _make_divisible(v: float, divisor: int = 8, min_value: int | None = None) -> int:
-    if min_value is None:
-        min_value = divisor
-    new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
+    min_val = divisor if min_value is None else min_value
+    new_v = max(min_val, int(v + divisor / 2) // divisor * divisor)
     # Ensure the round down does not go down by more than 10%.
-    if new_v < 0.9 * v:
-        new_v += divisor
-    return new_v
+    return new_v + divisor if new_v < 0.9 * v else new_v
 
 
 class MobileNetV3(nn.Module):

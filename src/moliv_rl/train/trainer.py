@@ -26,8 +26,8 @@ class ClassificationTrainer:
     def __init__(
         self,
         model: nn.Module,
-        optimizer: torch.optim.Optimizer,
-        criterion: nn.Module,
+        optimizer: torch.optim.Optimizer | None = None,
+        criterion: nn.Module | None = None,
         device: torch.device | str | None = None,
         scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
         scheduler_interval: Literal["epoch", "step"] = "epoch",
@@ -42,8 +42,9 @@ class ClassificationTrainer:
 
         self.device = torch.device(device)
         self.model = model.to(self.device)
+        self.model.to(memory_format=torch.channels_last)  # type: ignore[call-arg,no-matching-overload]
         self.optimizer = optimizer
-        self.criterion = criterion
+        self.criterion = criterion if criterion is not None else nn.CrossEntropyLoss()
         self.scheduler = scheduler
         self.scheduler_interval = scheduler_interval
         self.logger = logger or logging.getLogger(__name__)
@@ -75,6 +76,9 @@ class ClassificationTrainer:
         grad_accum_steps: int = 1,
     ) -> float:
         """Run one training epoch and return the mean batch loss."""
+        if self.optimizer is None:
+            raise ValueError("optimizer is required to run train_epoch")
+
         if epoch < 1:
             raise ValueError(f"epoch must be >= 1, got {epoch}")
 
@@ -91,8 +95,9 @@ class ClassificationTrainer:
         if num_loader_batches == 0:
             raise ValueError("dataloader must not be empty")
 
+        optimizer = self.optimizer
         self.model.train()
-        self.optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad(set_to_none=True)
 
         total_loss = 0.0
         num_batches = 0
@@ -109,6 +114,7 @@ class ClassificationTrainer:
 
             inputs = inputs.to(
                 self.device,
+                memory_format=torch.channels_last,
                 non_blocking=True,
             )
             targets = targets.to(
@@ -143,9 +149,9 @@ class ClassificationTrainer:
             progress.set_postfix(loss=f"{loss.detach().item():.4f}")
 
             if should_step:
-                self.scaler.step(self.optimizer)
+                self.scaler.step(optimizer)
                 self.scaler.update()
-                self.optimizer.zero_grad(set_to_none=True)
+                optimizer.zero_grad(set_to_none=True)
                 accumulation_count = 0
 
                 if self.scheduler is not None and self.scheduler_interval == "step":
@@ -155,7 +161,7 @@ class ClassificationTrainer:
             self.scheduler.step()
 
         mean_loss = total_loss / num_batches
-        learning_rate = self.optimizer.param_groups[0]["lr"]
+        learning_rate = optimizer.param_groups[0]["lr"]
 
         self.logger.info(
             "epoch=%d train_loss=%.6f lr=%.6g",
@@ -201,6 +207,7 @@ class ClassificationTrainer:
 
             inputs = inputs.to(
                 self.device,
+                memory_format=torch.channels_last,
                 non_blocking=True,
             )
             targets = targets.to(
@@ -284,9 +291,11 @@ class ClassificationTrainer:
         payload: dict[str, Any] = {
             "epoch": epoch,
             "model_state_dict": (self._model_for_checkpoint().state_dict()),
-            "optimizer_state_dict": self.optimizer.state_dict(),
             "scaler_state_dict": self.scaler.state_dict(),
         }
+
+        if self.optimizer is not None:
+            payload["optimizer_state_dict"] = self.optimizer.state_dict()
 
         if self.scheduler is not None:
             payload["scheduler_state_dict"] = self.scheduler.state_dict()
@@ -342,7 +351,7 @@ class ClassificationTrainer:
 
         self._model_for_checkpoint().load_state_dict(checkpoint["model_state_dict"])
 
-        if "optimizer_state_dict" in checkpoint:
+        if self.optimizer is not None and "optimizer_state_dict" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
         if self.scheduler is not None and "scheduler_state_dict" in checkpoint:

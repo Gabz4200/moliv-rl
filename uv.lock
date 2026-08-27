@@ -510,16 +510,12 @@ name = "moliv-rl"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "black" },
     { name = "einops" },
     { name = "hydra-core" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "omegaconf" },
     { name = "pillow" },
-    { name = "pyrefly" },
-    { name = "pytest" },
-    { name = "ruff" },
     { name = "tensorboard" },
     { name = "torch", version = "2.13.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.13.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
@@ -533,22 +529,22 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "black" },
+    { name = "pyrefly" },
+    { name = "pytest" },
+    { name = "ruff" },
     { name = "types-pyyaml" },
     { name = "types-tqdm" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "black" },
     { name = "einops", specifier = ">=0.8.2" },
     { name = "hydra-core" },
     { name = "matplotlib", specifier = ">=3.11.1" },
     { name = "numpy" },
     { name = "omegaconf" },
     { name = "pillow" },
-    { name = "pyrefly" },
-    { name = "pytest" },
-    { name = "ruff" },
     { name = "tensorboard" },
     { name = "torch", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torchao", index = "https://download.pytorch.org/whl/cpu" },
@@ -559,6 +555,10 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "black" },
+    { name = "pyrefly" },
+    { name = "pytest" },
+    { name = "ruff" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20260815" },
     { name = "types-tqdm", specifier = ">=4.70.0.20260805" },
 ]

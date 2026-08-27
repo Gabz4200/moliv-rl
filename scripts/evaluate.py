@@ -13,7 +13,7 @@ from torchvision.datasets import ImageFolder
 
 from moliv_rl.data.transforms import get_val_transforms
 from moliv_rl.metrics import PrecisionAverage
-from moliv_rl.models.my_model import MyModel
+from moliv_rl.models import get_model
 from moliv_rl.train.trainer import ClassificationTrainer
 from moliv_rl.utils.logger import get_logger
 
@@ -90,10 +90,66 @@ def parse_args() -> argparse.Namespace:
         help="Number of DataLoader worker processes.",
     )
     parser.add_argument(
+        "--pin-memory",
+        action=argparse.BooleanOptionalAction,
+        default=data_cfg.get("pin_memory", None),
+        help="Pin memory in DataLoader.",
+    )
+    parser.add_argument(
+        "--persistent-workers",
+        action=argparse.BooleanOptionalAction,
+        default=data_cfg.get("persistent_workers", None),
+        help="Use persistent workers in DataLoader.",
+    )
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        choices=("classification_model", "my_model"),
+        default=model_cfg.get("name", "classification_model"),
+        help="Model architecture name.",
+    )
+    parser.add_argument(
+        "--block-dims",
+        type=int,
+        nargs="+",
+        default=model_cfg.get("block_dims", [32, 64, 128]),
+        help="Feature dimensions across model stages.",
+    )
+    parser.add_argument(
+        "--in-channels",
+        type=int,
+        default=model_cfg.get("in_channels", 3),
+        help="Number of input image channels.",
+    )
+    parser.add_argument(
+        "--out-channels",
+        type=int,
+        default=model_cfg.get("out_channels", 512),
+        help="Output feature dimension of the backbone.",
+    )
+    parser.add_argument(
+        "--patch-size",
+        type=int,
+        default=model_cfg.get("patch_size", 8),
+        help="Patch/stride size for the initial stem convolution.",
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=model_cfg.get("dropout", 0.2),
+        help="Dropout rate in model blocks.",
+    )
+    parser.add_argument(
         "--num-classes",
         type=int,
         default=model_cfg.get("num_classes", 10),
-        help="Number of output classes in MyModel.",
+        help="Number of output classes in the model.",
+    )
+    parser.add_argument(
+        "--optimize-model",
+        action=argparse.BooleanOptionalAction,
+        default=model_cfg.get("optimize", False),
+        help="Compile model using torch.compile.",
     )
     parser.add_argument(
         "--image-size",
@@ -150,7 +206,7 @@ def resolve_device(device: str | None) -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
 
-    if torch.backends.mps.is_available():
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
 
     return torch.device("cpu")
@@ -168,6 +224,26 @@ def validate_args(args: argparse.Namespace) -> None:
 
     if args.num_classes <= 0:
         raise ValueError(f"num_classes must be positive, got {args.num_classes}")
+
+    if args.in_channels <= 0:
+        raise ValueError(f"in_channels must be positive, got {args.in_channels}")
+
+    if args.out_channels <= 0:
+        raise ValueError(f"out_channels must be positive, got {args.out_channels}")
+
+    if args.patch_size <= 0:
+        raise ValueError(f"patch_size must be positive, got {args.patch_size}")
+
+    if args.dropout < 0.0 or args.dropout >= 1.0:
+        raise ValueError(f"dropout must be in [0.0, 1.0), got {args.dropout}")
+
+    if len(args.block_dims) < 2:
+        raise ValueError(
+            f"block_dims must contain at least 2 dimensions, got {args.block_dims}"
+        )
+
+    if any(dim <= 0 for dim in args.block_dims):
+        raise ValueError(f"All block_dims must be positive, got {args.block_dims}")
 
     if args.image_size <= 0:
         raise ValueError(f"image_size must be positive, got {args.image_size}")
@@ -207,7 +283,15 @@ def create_dataloader(
     args: argparse.Namespace,
     device: torch.device,
 ) -> DataLoader:
-    pin_memory = device.type == "cuda"
+    pin_memory = (
+        args.pin_memory if args.pin_memory is not None else (device.type == "cuda")
+    )
+    persistent_workers = (
+        args.persistent_workers
+        if args.persistent_workers is not None
+        else (args.num_workers > 0)
+    )
+    use_persistent = persistent_workers if args.num_workers > 0 else False
 
     return DataLoader(
         dataset,
@@ -215,7 +299,7 @@ def create_dataloader(
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=pin_memory,
-        persistent_workers=args.num_workers > 0,
+        persistent_workers=use_persistent,
     )
 
 
@@ -224,18 +308,25 @@ def create_trainer(
     device: torch.device,
     logger: logging.Logger,
 ) -> ClassificationTrainer:
-    model = MyModel(num_classes=args.num_classes)
+    model_kwargs: dict[str, Any] = {
+        "block_dims": args.block_dims,
+        "in_channels": args.in_channels,
+        "out_channels": args.out_channels,
+        "patch_size": args.patch_size,
+        "dropout": args.dropout,
+    }
+    if args.model_name == "classification_model":
+        model_kwargs["num_classes"] = args.num_classes
 
-    # The optimizer is required by ClassificationTrainer even though it is
-    # not used to calculate evaluation metrics.
-    optimizer = torch.optim.SGD(
-        model.parameters(),
-        lr=0.0,
+    model = get_model(
+        model_name=args.model_name,
+        optimize=args.optimize_model,
+        **model_kwargs,
     )
 
     return ClassificationTrainer(
         model=model,
-        optimizer=optimizer,
+        optimizer=None,
         criterion=nn.CrossEntropyLoss(),
         device=device,
         logger=logger,

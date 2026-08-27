@@ -1,4 +1,6 @@
-from .dataset import train_dataset, val_dataset
+from __future__ import annotations
+
+from .dataset import get_dataloaders, get_default_datasets
 from .transforms import (
     IMAGENET_MEAN,
     IMAGENET_STD,
@@ -9,8 +11,8 @@ from .transforms import (
 __all__ = [
     "IMAGENET_MEAN",
     "IMAGENET_STD",
+    "get_dataloaders",
+    "get_default_datasets",
     "get_train_transforms",
     "get_val_transforms",
-    "train_dataset",
-    "val_dataset",
 ]

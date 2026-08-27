@@ -11,13 +11,14 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 
+from moliv_rl.data import get_dataloaders
 from moliv_rl.data.transforms import (
     get_train_transforms,
     get_val_transforms,
 )
 from moliv_rl.losses import FocalLoss
 from moliv_rl.metrics import PrecisionAverage
-from moliv_rl.models.my_model import MyModel
+from moliv_rl.models import get_model
 from moliv_rl.train.trainer import ClassificationTrainer
 from moliv_rl.utils.logger import get_logger
 from moliv_rl.utils.reproducibility import seed_worker, set_seeds
@@ -198,10 +199,54 @@ def parse_args() -> argparse.Namespace:
         help="Minimum learning rate for cosine annealing.",
     )
     parser.add_argument(
+        "--model-name",
+        type=str,
+        choices=("classification_model", "my_model"),
+        default=model_cfg.get("name", "classification_model"),
+        help="Model architecture name.",
+    )
+    parser.add_argument(
+        "--block-dims",
+        type=int,
+        nargs="+",
+        default=model_cfg.get("block_dims", [32, 64, 128]),
+        help="Feature dimensions across model stages.",
+    )
+    parser.add_argument(
+        "--in-channels",
+        type=int,
+        default=model_cfg.get("in_channels", 3),
+        help="Number of input image channels.",
+    )
+    parser.add_argument(
+        "--out-channels",
+        type=int,
+        default=model_cfg.get("out_channels", 512),
+        help="Output feature dimension of the backbone.",
+    )
+    parser.add_argument(
+        "--patch-size",
+        type=int,
+        default=model_cfg.get("patch_size", 8),
+        help="Patch/stride size for the initial stem convolution.",
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=model_cfg.get("dropout", 0.2),
+        help="Dropout rate in model blocks.",
+    )
+    parser.add_argument(
         "--num-classes",
         type=int,
         default=model_cfg.get("num_classes", 10),
         help="Number of output classes.",
+    )
+    parser.add_argument(
+        "--optimize-model",
+        action=argparse.BooleanOptionalAction,
+        default=model_cfg.get("optimize", False),
+        help="Compile model using torch.compile.",
     )
     parser.add_argument(
         "--image-size",
@@ -298,6 +343,26 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.num_classes <= 0:
         raise ValueError(f"num_classes must be positive, got {args.num_classes}")
 
+    if args.in_channels <= 0:
+        raise ValueError(f"in_channels must be positive, got {args.in_channels}")
+
+    if args.out_channels <= 0:
+        raise ValueError(f"out_channels must be positive, got {args.out_channels}")
+
+    if args.patch_size <= 0:
+        raise ValueError(f"patch_size must be positive, got {args.patch_size}")
+
+    if args.dropout < 0.0 or args.dropout >= 1.0:
+        raise ValueError(f"dropout must be in [0.0, 1.0), got {args.dropout}")
+
+    if len(args.block_dims) < 2:
+        raise ValueError(
+            f"block_dims must contain at least 2 dimensions, got {args.block_dims}"
+        )
+
+    if any(dim <= 0 for dim in args.block_dims):
+        raise ValueError(f"All block_dims must be positive, got {args.block_dims}")
+
     if args.image_size <= 0:
         raise ValueError(f"image_size must be positive, got {args.image_size}")
 
@@ -389,31 +454,17 @@ def build_dataloaders(
         if args.persistent_workers is not None
         else (args.num_workers > 0)
     )
-    if args.num_workers == 0:
-        persistent_workers = False
 
-    common_kwargs = {
-        "batch_size": args.batch_size,
-        "num_workers": args.num_workers,
-        "pin_memory": pin_memory,
-        "persistent_workers": persistent_workers,
-        "worker_init_fn": seed_worker,
-    }
-
-    train_loader = DataLoader(
-        train_dataset,
-        shuffle=True,
+    return get_dataloaders(
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
         generator=generator,
-        **common_kwargs,
+        worker_init_fn=seed_worker,
     )
-
-    val_loader = DataLoader(
-        val_dataset,
-        shuffle=False,
-        **common_kwargs,
-    )
-
-    return train_loader, val_loader
 
 
 def build_trainer(
@@ -423,8 +474,20 @@ def build_trainer(
     steps_per_epoch: int,
 ) -> ClassificationTrainer:
     """Build the model, optimizer, scheduler, and trainer."""
-    model = MyModel(
-        num_classes=args.num_classes,
+    model_kwargs: dict[str, Any] = {
+        "block_dims": args.block_dims,
+        "in_channels": args.in_channels,
+        "out_channels": args.out_channels,
+        "patch_size": args.patch_size,
+        "dropout": args.dropout,
+    }
+    if args.model_name == "classification_model":
+        model_kwargs["num_classes"] = args.num_classes
+
+    model = get_model(
+        model_name=args.model_name,
+        optimize=args.optimize_model,
+        **model_kwargs,
     )
 
     if args.loss in ("focal_loss", "focal"):
@@ -461,13 +524,14 @@ def build_trainer(
         raise ValueError(f"Unsupported optimizer: {args.optimizer}")
 
     if args.scheduler in ("cosine_annealing", "cosine"):
-        if args.scheduler_interval == "epoch":
-            scheduler_t_max = args.epochs
-        else:
-            optimizer_steps_per_epoch = (
-                steps_per_epoch + args.grad_accum_steps - 1
-            ) // args.grad_accum_steps
-            scheduler_t_max = args.epochs * optimizer_steps_per_epoch
+        optimizer_steps_per_epoch = (
+            steps_per_epoch + args.grad_accum_steps - 1
+        ) // args.grad_accum_steps
+        scheduler_t_max = (
+            args.epochs
+            if args.scheduler_interval == "epoch"
+            else args.epochs * optimizer_steps_per_epoch
+        )
 
         scheduler: torch.optim.lr_scheduler.LRScheduler | None = (
             torch.optim.lr_scheduler.CosineAnnealingLR(

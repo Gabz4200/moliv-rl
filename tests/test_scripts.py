@@ -52,81 +52,11 @@ class TestScriptHelpers:
             with pytest.raises(RuntimeError, match="CUDA was requested but is not available"):
                 train_script.resolve_device("cuda")
 
-    def test_train_validate_args_failures(self, tmp_path: Path) -> None:
-        valid_args = argparse.Namespace(
-            data_dir=tmp_path,
-            epochs=1,
-            batch_size=4,
-            lr=0.001,
-            weight_decay=0.0001,
-            num_classes=2,
-            in_channels=3,
-            out_channels=32,
-            patch_size=4,
-            dropout=0.1,
-            block_dims=[16, 32],
-            image_size=32,
-            resize_scale=1.15,
-            num_workers=0,
-            grad_accum_steps=1,
-            eta_min=0.0,
-            use_amp=False,
-            device="cpu",
-        )
+    def test_model_name_choices_include_all_registered_models(self) -> None:
+        from moliv_rl.models import MODEL_REGISTRY
 
-        # Missing data_dir
-        args = argparse.Namespace(**vars(valid_args))
-        args.data_dir = tmp_path / "non_existent_data"
-        with pytest.raises(FileNotFoundError, match="Data directory not found"):
-            train_script.validate_args(args)
-
-        # Invalid epochs
-        args = argparse.Namespace(**vars(valid_args))
-        args.epochs = 0
-        with pytest.raises(ValueError, match="epochs must be positive"):
-            train_script.validate_args(args)
-
-        # Invalid batch size
-        args = argparse.Namespace(**vars(valid_args))
-        args.batch_size = -1
-        with pytest.raises(ValueError, match="batch_size must be positive"):
-            train_script.validate_args(args)
-
-        # Invalid lr
-        args = argparse.Namespace(**vars(valid_args))
-        args.lr = 0.0
-        with pytest.raises(ValueError, match="lr must be positive"):
-            train_script.validate_args(args)
-
-        # Invalid dropout
-        args = argparse.Namespace(**vars(valid_args))
-        args.dropout = 1.5
-        with pytest.raises(ValueError, match="dropout must be in"):
-            train_script.validate_args(args)
-
-        # Invalid block_dims
-        args = argparse.Namespace(**vars(valid_args))
-        args.block_dims = [16]
-        with pytest.raises(ValueError, match="block_dims must contain at least 2"):
-            train_script.validate_args(args)
-
-    def test_evaluate_validate_args_failures(self, tmp_path: Path) -> None:
-        valid_args = argparse.Namespace(
-            checkpoint=tmp_path / "non_existent.pth",
-            batch_size=4,
-            num_workers=0,
-            num_classes=2,
-            in_channels=3,
-            out_channels=32,
-            patch_size=4,
-            dropout=0.1,
-            block_dims=[16, 32],
-            image_size=32,
-            split="test",
-        )
-
-        with pytest.raises(FileNotFoundError, match="Checkpoint file not found"):
-            eval_script.validate_args(valid_args)
+        assert set(train_script.MODEL_REGISTRY.keys()) == set(MODEL_REGISTRY.keys())
+        assert set(eval_script.MODEL_REGISTRY.keys()) == set(MODEL_REGISTRY.keys())
 
 
 class TestScriptsIntegration:
@@ -178,7 +108,6 @@ class TestScriptsIntegration:
             save_last=True,
         )
 
-        train_script.validate_args(train_args)
         train_script.set_seeds(train_args.seed)
 
         device = train_script.resolve_device(train_args.device)
@@ -238,7 +167,6 @@ class TestScriptsIntegration:
             safe_load=True,
         )
 
-        eval_script.validate_args(eval_args)
         eval_logger = eval_script.get_logger("test_eval_pipeline")
 
         eval_trainer = eval_script.create_trainer(

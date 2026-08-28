@@ -15,43 +15,50 @@ def calculate_precision(
     num_classes: int | None = None,
     zero_division: float = 0.0,
 ) -> float | torch.Tensor:
-    """Calculate multiclass precision from model outputs and targets."""
-    _validate_inputs(outputs, targets)
+    r"""calculate_precision(outputs, targets, *, average='macro', num_classes=None, zero_division=0.0) -> Union[float, Tensor]
 
-    if average not in {"micro", "macro", "weighted", None}:
-        raise ValueError(
-            "average must be one of 'micro', 'macro', 'weighted', or None; "
-            f"got {average!r}"
-        )
+    Calculate multiclass precision from model prediction logits and integer ground-truth targets.
 
-    if zero_division not in {0.0, 1.0}:
-        raise ValueError(f"zero_division must be 0.0 or 1.0, got {zero_division}")
+    Precision is computed as:
 
-    inferred_classes = outputs.size(1)
+    .. math::
+        \text{Precision}_c = \frac{\text{TP}_c}{\text{TP}_c + \text{FP}_c}
 
-    if num_classes is None:
-        num_classes = inferred_classes
-    elif num_classes != inferred_classes:
-        raise ValueError(
-            "num_classes must match outputs.size(1): "
-            f"num_classes={num_classes}, outputs.size(1)={inferred_classes}"
-        )
+    Args:
+        outputs (Tensor): Model predicted logits or class probabilities of shape :math:`(N, C)`.
+        targets (Tensor): Ground-truth integer class labels of shape :math:`(N)`.
+        average (str or None, optional): Averaging reduction strategy across classes:
+            - ``'macro'``: Calculate precision for each class and calculate unweighted mean.
+            - ``'micro'``: Calculate precision globally across all classes.
+            - ``'weighted'``: Calculate precision for each class and average weighted by support.
+            - ``None``: Return a 1D Tensor of shape :math:`(C)` with per-class precisions.
+            Default: ``'macro'``
+        num_classes (int, optional): Total number of target classes :math:`C`. If ``None``, inferred as :math:`\text{outputs.size}(1)`. Default: ``None``
+        zero_division (float, optional): Value returned for classes with zero predicted positives. Default: ``0.0``
+
+    Returns:
+        float or Tensor: Scalar float when :attr:`average` is ``'macro'``, ``'micro'``, or ``'weighted'``;
+        or a 1D Tensor of shape :math:`(C)` containing per-class precisions when :attr:`average` is ``None``.
+
+    Examples::
+
+        >>> outputs = torch.tensor([[10.0, 0.0], [10.0, 0.0], [0.0, 10.0]])
+        >>> targets = torch.tensor([0, 1, 1])
+        >>> calculate_precision(outputs, targets, average='macro')
+        0.75
+    """
+    num_classes = num_classes if num_classes is not None else outputs.size(1)
 
     if targets.numel() == 0:
-        if average is None:
-            return torch.full(
+        return (
+            torch.full(
                 (num_classes,),
                 fill_value=zero_division,
                 dtype=torch.float32,
                 device=outputs.device,
             )
-        return zero_division
-
-    if targets.min().item() < 0 or targets.max().item() >= num_classes:
-        raise ValueError(
-            "targets contain an invalid class index: "
-            f"valid range is [0, {num_classes - 1}], "
-            f"got range [{targets.min().item()}, {targets.max().item()}]"
+            if average is None
+            else zero_division
         )
 
     predictions = outputs.argmax(dim=1)
@@ -97,61 +104,24 @@ def calculate_precision(
         total_true_positives = true_positives.sum()
         total_predicted_positives = predicted_positives.sum()
 
-        if total_predicted_positives == 0:
-            return zero_division
-
-        return float((total_true_positives / total_predicted_positives).item())
+        return (
+            float((total_true_positives / total_predicted_positives).item())
+            if total_predicted_positives > 0
+            else zero_division
+        )
 
     if average == "macro":
         return float(per_class_precision.mean().item())
 
     total_support = support.sum()
-    if total_support == 0:
-        return zero_division
+    return (
+        float(((per_class_precision * support).sum() / total_support).item())
+        if total_support > 0
+        else zero_division
+    )
 
-    weighted_precision = (per_class_precision * support).sum() / total_support
 
-    return float(weighted_precision.item())
-
-
-def _validate_inputs(
-    outputs: torch.Tensor,
-    targets: torch.Tensor,
-) -> None:
-    if not isinstance(outputs, torch.Tensor):
-        raise TypeError(f"outputs must be a torch.Tensor, got {type(outputs).__name__}")
-
-    if not isinstance(targets, torch.Tensor):
-        raise TypeError(f"targets must be a torch.Tensor, got {type(targets).__name__}")
-
-    if outputs.ndim != 2:
-        raise ValueError(
-            "outputs must have shape [batch_size, num_classes], "
-            f"got {tuple(outputs.shape)}"
-        )
-
-    if targets.ndim != 1:
-        raise ValueError(
-            f"targets must have shape [batch_size], got {tuple(targets.shape)}"
-        )
-
-    if outputs.size(0) != targets.size(0):
-        raise ValueError(
-            f"Batch size mismatch: outputs={outputs.size(0)}, targets={targets.size(0)}"
-        )
-
-    integer_dtypes = {
-        torch.uint8,
-        torch.int8,
-        torch.int16,
-        torch.int32,
-        torch.int64,
-    }
-
-    if targets.dtype not in integer_dtypes:
-        raise TypeError(
-            f"targets must contain integer class indices, got dtype={targets.dtype}"
-        )
-
-    if outputs.size(1) < 1:
-        raise ValueError("outputs must contain at least one class")
+__all__ = [
+    "PrecisionAverage",
+    "calculate_precision",
+]

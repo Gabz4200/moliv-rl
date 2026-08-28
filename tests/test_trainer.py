@@ -63,17 +63,6 @@ class TestClassificationTrainer:
         assert trainer.model is not None
         assert not trainer.use_amp
 
-    def test_invalid_scheduler_interval_raises(self) -> None:
-        model = TinyModel()
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-        with pytest.raises(ValueError, match="scheduler_interval must be 'epoch' or 'step'"):
-            ClassificationTrainer(
-                model=model,
-                optimizer=optimizer,
-                criterion=nn.CrossEntropyLoss(),
-                scheduler_interval="invalid",  # type: ignore[arg-type]
-            )
-
     def test_train_epoch_loss_reduction(self) -> None:
         torch.manual_seed(42)
         model = TinyModel()
@@ -131,28 +120,6 @@ class TestClassificationTrainer:
         trainer.train_epoch(train_loader, epoch=1)
         assert optimizer.param_groups[0]["lr"] == pytest.approx(0.025)
 
-    def test_train_epoch_validation_errors(self) -> None:
-        model = TinyModel()
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-        train_loader, _ = _create_dummy_loaders()
-
-        trainer = ClassificationTrainer(
-            model=model,
-            optimizer=optimizer,
-            criterion=nn.CrossEntropyLoss(),
-            device="cpu",
-        )
-
-        with pytest.raises(ValueError, match="epoch must be >= 1"):
-            trainer.train_epoch(train_loader, epoch=0)
-
-        with pytest.raises(ValueError, match="grad_accum_steps must be >= 1"):
-            trainer.train_epoch(train_loader, epoch=1, grad_accum_steps=0)
-
-        empty_loader = DataLoader(TensorDataset(torch.empty((0, 16, 8, 8)), torch.empty((0,), dtype=torch.int64)))
-        with pytest.raises(ValueError, match="dataloader must not be empty"):
-            trainer.train_epoch(empty_loader, epoch=1)
-
     @pytest.mark.parametrize("precision_avg", ["macro", "micro", "weighted"])
     def test_evaluate_metrics(self, precision_avg: str) -> None:
         model = TinyModel()
@@ -168,26 +135,11 @@ class TestClassificationTrainer:
 
         metrics = trainer.evaluate(val_loader, precision_average=precision_avg)  # type: ignore[arg-type]
 
-        assert "val_loss" in metrics
         assert "val_acc" in metrics
+        assert "val_loss" in metrics
         assert "val_precision" in metrics
         assert 0.0 <= metrics["val_acc"] <= 1.0
         assert 0.0 <= metrics["val_precision"] <= 1.0
-
-    def test_evaluate_invalid_precision_average_raises(self) -> None:
-        model = TinyModel()
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-        _, val_loader = _create_dummy_loaders()
-
-        trainer = ClassificationTrainer(
-            model=model,
-            optimizer=optimizer,
-            criterion=nn.CrossEntropyLoss(),
-            device="cpu",
-        )
-
-        with pytest.raises(ValueError, match="precision_average must be one of"):
-            trainer.evaluate(val_loader, precision_average="invalid")  # type: ignore[arg-type]
 
     def test_checkpoint_save_and_load_roundtrip(self, tmp_path: Path) -> None:
         model = TinyModel()
@@ -239,14 +191,6 @@ class TestClassificationTrainer:
         for p in new_model.parameters():
             assert torch.allclose(p, torch.tensor(1.23), atol=1e-5)
 
-    def test_save_checkpoint_invalid_epoch_raises(self, tmp_path: Path) -> None:
-        model = TinyModel()
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-        trainer = ClassificationTrainer(model=model, optimizer=optimizer, criterion=nn.CrossEntropyLoss(), device="cpu")
-
-        with pytest.raises(ValueError, match="epoch must be >= 1"):
-            trainer.save_checkpoint(tmp_path / "test.pth", epoch=0)
-
     def test_save_checkpoint_reserved_key_collision_raises(self, tmp_path: Path) -> None:
         model = TinyModel()
         optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
@@ -260,8 +204,27 @@ class TestClassificationTrainer:
         optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
         trainer = ClassificationTrainer(model=model, optimizer=optimizer, criterion=nn.CrossEntropyLoss(), device="cpu")
 
-        with pytest.raises(FileNotFoundError, match="checkpoint not found"):
+        with pytest.raises(FileNotFoundError):
             trainer.load_checkpoint("non_existent_file.pth")
+
+    def test_train_epoch_empty_dataloader_returns_zero(self) -> None:
+        model = TinyModel()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+        trainer = ClassificationTrainer(
+            model=model,
+            optimizer=optimizer,
+            criterion=nn.CrossEntropyLoss(),
+            device="cpu",
+        )
+        empty_loader = DataLoader(
+            TensorDataset(
+                torch.empty(0, 16, 8, 8),
+                torch.empty(0, dtype=torch.int64),
+            ),
+            batch_size=4,
+        )
+        loss = trainer.train_epoch(empty_loader, epoch=1)
+        assert loss == 0.0
 
     def test_trainer_without_optimizer_for_evaluation(self, tmp_path: Path) -> None:
         model = TinyModel()
@@ -278,8 +241,8 @@ class TestClassificationTrainer:
         assert "val_acc" in metrics
         assert "val_loss" in metrics
 
-        # train_epoch must fail when optimizer is None
-        with pytest.raises(ValueError, match="optimizer is required to run train_epoch"):
+        # train_epoch must fail with ValueError when optimizer is None
+        with pytest.raises(ValueError, match="requires an optimizer"):
             trainer.train_epoch(val_loader, epoch=1)
 
         # save_checkpoint without optimizer

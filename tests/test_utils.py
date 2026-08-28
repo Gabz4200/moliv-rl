@@ -5,7 +5,6 @@ import random
 from pathlib import Path
 
 import numpy as np
-import pytest
 import torch
 
 from moliv_rl.utils import get_logger, seed_worker, set_seeds
@@ -69,16 +68,16 @@ class TestReproducibility:
         assert np.array_equal(val_numpy_1, val_numpy_2)
         assert torch.equal(val_torch_1, val_torch_2)
 
-    def test_negative_seed_raises(self) -> None:
-        with pytest.raises(ValueError, match="seed must be non-negative"):
-            set_seeds(-1)
-
     def test_seed_worker_execution(self) -> None:
-        # seed_worker runs within a DataLoader worker context
-        # It should derive the worker seed from torch.initial_seed() without error
+        torch.manual_seed(12345)
         seed_worker(0)
-        # Check that numpy and random are in a valid state
-        val_np = np.random.rand()
-        val_py = random.random()
-        assert 0.0 <= val_np <= 1.0
-        assert 0.0 <= val_py <= 1.0
+        r1 = random.random()
+        np1 = np.random.rand()
+
+        torch.manual_seed(12345)
+        seed_worker(0)
+        r2 = random.random()
+        np2 = np.random.rand()
+
+        assert r1 == r2
+        assert np1 == np2

@@ -10,10 +10,45 @@ Reduction = Literal["none", "mean", "sum"]
 
 
 class FocalLoss(nn.Module):
-    """Multiclass focal loss for logits and integer class targets.
+    r"""FocalLoss(alpha=None, gamma=2.0, reduction='mean', ignore_index=-100, label_smoothing=0.0)
 
-    Supports standard classification inputs shaped ``[N, C]`` and dense
-    classification inputs shaped ``[N, C, d1, ..., dK]``.
+    Multiclass focal loss criterion for logits and integer class targets based on
+    `Focal Loss for Dense Object Detection`_.
+
+    The focal loss is defined as:
+
+    .. math::
+        \text{FL}(p_t) = -\alpha_t (1 - p_t)^\gamma \log(p_t)
+
+    where :math:`p_t` is the model's estimated probability for the ground-truth class,
+    :math:`\gamma` is the focusing parameter, and :math:`\alpha_t` is an optional balancing factor.
+
+    Supports standard classification inputs shaped :math:`(N, C)` and dense
+    classification inputs shaped :math:`(N, C, d_1, \dots, d_K)`.
+
+    Args:
+        alpha (float or Tensor, optional): Weighting factor. Can be a scalar float or a 1D Tensor of shape
+            :math:`(C)` assigning per-class weights. Default: ``None``
+        gamma (float, optional): Focusing parameter :math:`\gamma \ge 0` modulating easy examples. Default: ``2.0``
+        reduction (str, optional): Reduction mode (``'none'``, ``'mean'``, or ``'sum'``). Default: ``'mean'``
+        ignore_index (int, optional): Target class value that is ignored and contributes zero gradient. Default: ``-100``
+        label_smoothing (float, optional): Label smoothing epsilon in :math:`[0.0, 1.0]`. Default: ``0.0``
+
+    Shape:
+        - Input: :math:`(N, C)` where :math:`C` is the number of classes, or :math:`(N, C, d_1, \dots, d_K)`.
+        - Target: :math:`(N)` where each value is :math:`0 \le \text{targets}[i] < C`, or :math:`(N, d_1, \dots, d_K)`.
+        - Output: Scalar if :attr:`reduction` is ``'mean'`` or ``'sum'``; otherwise same shape as target.
+
+    Examples::
+
+        >>> criterion = FocalLoss(gamma=2.0)
+        >>> inputs = torch.randn(4, 5, requires_grad=True)
+        >>> targets = torch.tensor([1, 0, 4, 2])
+        >>> loss = criterion(inputs, targets)
+        >>> loss.backward()
+
+    .. _`Focal Loss for Dense Object Detection`:
+        https://arxiv.org/abs/1708.02002
     """
 
     def __init__(
@@ -26,47 +61,13 @@ class FocalLoss(nn.Module):
     ) -> None:
         super().__init__()
 
-        if gamma < 0:
-            raise ValueError(f"gamma must be non-negative, got {gamma}")
-
-        if reduction not in {"none", "mean", "sum"}:
-            raise ValueError(
-                f"reduction must be one of 'none', 'mean', or 'sum'; got {reduction!r}"
-            )
-
-        if not 0.0 <= label_smoothing <= 1.0:
-            raise ValueError(
-                f"label_smoothing must be in [0.0, 1.0], got {label_smoothing}"
-            )
-
-        if isinstance(alpha, (float, int)) and alpha < 0:
-            raise ValueError(f"alpha must be non-negative, got {alpha}")
-
-        if alpha is not None and not isinstance(
-            alpha,
-            (float, int, torch.Tensor),
-        ):
-            raise TypeError(
-                "alpha must be None, a non-negative scalar, "
-                "or a tensor of class weights"
-            )
-
         if isinstance(alpha, torch.Tensor):
-            if alpha.ndim != 1:
-                raise ValueError(
-                    "tensor alpha must have shape [num_classes], "
-                    f"got {tuple(alpha.shape)}"
-                )
-
-            if not torch.is_floating_point(alpha):
-                alpha = alpha.float()
-
-            if torch.any(alpha < 0):
-                raise ValueError("all tensor alpha values must be non-negative")
-
+            alpha_tensor = (
+                alpha.float() if not torch.is_floating_point(alpha) else alpha
+            )
             self.register_buffer(
                 "alpha",
-                alpha.detach().clone(),
+                alpha_tensor.detach().clone(),
             )
             self.alpha_scalar: float | None = None
         else:
@@ -83,31 +84,15 @@ class FocalLoss(nn.Module):
         inputs: torch.Tensor,
         targets: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute focal loss from logits and integer class targets."""
-        self._validate_inputs(inputs, targets)
+        """Compute focal loss from logits and integer class targets.
 
-        if inputs.ndim == 2:
-            expected_target_shape = (inputs.size(0),)
-        else:
-            expected_target_shape = (
-                inputs.size(0),
-                *inputs.shape[2:],
-            )
+        Args:
+            inputs: Unnormalized model logits shaped [N, C] or [N, C, d1, ..., dK].
+            targets: Ground-truth class indices shaped [N] or [N, d1, ..., dK].
 
-        if tuple(targets.shape) != expected_target_shape:
-            raise ValueError(
-                "targets must have shape "
-                f"{expected_target_shape} for inputs shaped "
-                f"{tuple(inputs.shape)}, got {tuple(targets.shape)}"
-            )
-
-        if self.alpha is not None and self.alpha.numel() != inputs.size(1):
-            raise ValueError(
-                "alpha must contain one value per class: "
-                f"expected {inputs.size(1)}, "
-                f"got {self.alpha.numel()}"
-            )
-
+        Returns:
+            Computed focal loss (scalar or Tensor matching reduction mode).
+        """
         ce_loss = F.cross_entropy(
             inputs,
             targets,
@@ -136,45 +121,10 @@ class FocalLoss(nn.Module):
 
         valid_count = (~ignored).sum()
 
-        if valid_count == 0:
-            return focal_loss.sum()
+        return focal_loss.sum() / valid_count if valid_count > 0 else focal_loss.sum()
 
-        return focal_loss.sum() / valid_count
 
-    @staticmethod
-    def _validate_inputs(
-        inputs: torch.Tensor,
-        targets: torch.Tensor,
-    ) -> None:
-        if not isinstance(inputs, torch.Tensor):
-            raise TypeError(
-                f"inputs must be a torch.Tensor, got {type(inputs).__name__}"
-            )
-
-        if not isinstance(targets, torch.Tensor):
-            raise TypeError(
-                f"targets must be a torch.Tensor, got {type(targets).__name__}"
-            )
-
-        if inputs.ndim < 2:
-            raise ValueError(
-                f"inputs must have shape [N, C, ...], got {tuple(inputs.shape)}"
-            )
-
-        if targets.dtype not in {
-            torch.uint8,
-            torch.int8,
-            torch.int16,
-            torch.int32,
-            torch.int64,
-        }:
-            raise TypeError(
-                f"targets must contain integer class indices, got dtype={targets.dtype}"
-            )
-
-        if inputs.size(0) != targets.size(0):
-            raise ValueError(
-                "Batch size mismatch: "
-                f"inputs={inputs.size(0)}, "
-                f"targets={targets.size(0)}"
-            )
+__all__ = [
+    "FocalLoss",
+    "Reduction",
+]

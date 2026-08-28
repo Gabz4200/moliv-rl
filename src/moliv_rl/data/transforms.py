@@ -17,33 +17,6 @@ IMAGENET_STD: tuple[float, float, float] = (
 )
 
 
-def _validate_image_size(image_size: int) -> None:
-    if image_size <= 0:
-        raise ValueError(f"image_size must be positive, got {image_size}")
-
-
-def _validate_resize_scale(resize_scale: float) -> None:
-    if resize_scale < 1.0:
-        raise ValueError(f"resize_scale must be >= 1.0, got {resize_scale}")
-
-
-def _validate_normalization(
-    mean: Sequence[float],
-    std: Sequence[float],
-) -> None:
-    if len(mean) != len(std):
-        raise ValueError(
-            "mean and std must have the same number of channels: "
-            f"mean={len(mean)}, std={len(std)}"
-        )
-
-    if len(mean) == 0:
-        raise ValueError("mean and std must not be empty")
-
-    if any(value <= 0 for value in std):
-        raise ValueError("all std values must be positive")
-
-
 def get_train_transforms(
     image_size: int = 64,
     *,
@@ -52,17 +25,24 @@ def get_train_transforms(
     resize_scale: float = 1.15,
     horizontal_flip_probability: float = 0.5,
 ) -> transforms.Compose:
-    """Build the training image transformation pipeline."""
-    _validate_image_size(image_size)
-    _validate_resize_scale(resize_scale)
-    _validate_normalization(mean, std)
+    r"""get_train_transforms(image_size=64, *, mean=IMAGENET_MEAN, std=IMAGENET_STD, resize_scale=1.15, horizontal_flip_probability=0.5) -> transforms.Compose
 
-    if not 0.0 <= horizontal_flip_probability <= 1.0:
-        raise ValueError(
-            "horizontal_flip_probability must be in [0.0, 1.0], "
-            f"got {horizontal_flip_probability}"
-        )
+    Build the standard data augmentation and normalization pipeline for training.
 
+    Args:
+        image_size (int, optional): Target output image spatial dimension :math:`(H = W)`. Default: ``64``
+        mean (Sequence of float, optional): Per-channel normalization means. Default: :attr:`IMAGENET_MEAN`
+        std (Sequence of float, optional): Per-channel normalization standard deviations. Default: :attr:`IMAGENET_STD`
+        resize_scale (float, optional): Scale factor to enlarge image prior to random crop. Default: ``1.15``
+        horizontal_flip_probability (float, optional): Probability of random horizontal flip. Default: ``0.5``
+
+    Returns:
+        transforms.Compose: Composed torchvision transformation pipeline.
+
+    Examples::
+
+        >>> transform = get_train_transforms(image_size=224)
+    """
     resize_size = max(
         image_size,
         round(image_size * resize_scale),
@@ -94,11 +74,23 @@ def get_val_transforms(
     std: Sequence[float] = IMAGENET_STD,
     resize_scale: float = 1.15,
 ) -> transforms.Compose:
-    """Build the deterministic validation transformation pipeline."""
-    _validate_image_size(image_size)
-    _validate_resize_scale(resize_scale)
-    _validate_normalization(mean, std)
+    r"""get_val_transforms(image_size=64, *, mean=IMAGENET_MEAN, std=IMAGENET_STD, resize_scale=1.15) -> transforms.Compose
 
+    Build the deterministic evaluation transformation pipeline.
+
+    Args:
+        image_size (int, optional): Target output image spatial dimension :math:`(H = W)`. Default: ``64``
+        mean (Sequence of float, optional): Per-channel normalization means. Default: :attr:`IMAGENET_MEAN`
+        std (Sequence of float, optional): Per-channel normalization standard deviations. Default: :attr:`IMAGENET_STD`
+        resize_scale (float, optional): Scale factor to resize image prior to center crop. Default: ``1.15``
+
+    Returns:
+        transforms.Compose: Composed torchvision transformation pipeline for evaluation.
+
+    Examples::
+
+        >>> transform = get_val_transforms(image_size=224)
+    """
     resize_size = max(
         image_size,
         round(image_size * resize_scale),
@@ -120,3 +112,11 @@ def get_val_transforms(
             ),
         ]
     )
+
+
+__all__ = [
+    "IMAGENET_MEAN",
+    "IMAGENET_STD",
+    "get_train_transforms",
+    "get_val_transforms",
+]

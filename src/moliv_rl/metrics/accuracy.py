@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import torch
@@ -8,9 +7,19 @@ import torch
 
 @dataclass
 class AverageMeter:
-    """Track a weighted running average.
+    r"""AverageMeter()
 
-    Useful for metrics such as loss, accuracy, throughput, or learning rate.
+    Computes and stores the running average and current value of a metric.
+
+    Useful for tracking metrics such as loss, accuracy, throughput, and learning rate.
+
+    Examples::
+
+        >>> meter = AverageMeter()
+        >>> meter.update(10.0, n=2)
+        >>> meter.update(20.0, n=3)
+        >>> meter.avg
+        16.0
     """
 
     val: float = 0.0
@@ -27,12 +36,6 @@ class AverageMeter:
 
     def update(self, value: float, n: int = 1) -> None:
         """Add ``n`` observations with the specified value."""
-        if not math.isfinite(value):
-            raise ValueError(f"value must be finite, got {value}")
-
-        if n < 0:
-            raise ValueError(f"n must be non-negative, got {n}")
-
         if n == 0:
             return
 
@@ -46,50 +49,38 @@ def calculate_accuracy(
     outputs: torch.Tensor,
     targets: torch.Tensor,
 ) -> float:
-    """Calculate top-1 accuracy for single-label classification."""
-    if outputs.ndim != 2:
-        raise ValueError(
-            "outputs must have shape [batch_size, num_classes], "
-            f"got {tuple(outputs.shape)}"
-        )
+    r"""calculate_accuracy(outputs, targets) -> float
 
-    if targets.ndim != 1:
-        raise ValueError(
-            f"targets must have shape [batch_size], got {tuple(targets.shape)}"
-        )
+    Calculate top-1 classification accuracy from model logits and integer targets.
 
-    batch_size, num_classes = outputs.shape
+    .. math::
+        \text{Accuracy} = \frac{1}{N} \sum_{i=1}^N \mathbf{1}(\text{argmax}(\text{outputs}_i) = \text{targets}_i)
 
-    if targets.size(0) != batch_size:
-        raise ValueError(
-            f"Batch size mismatch: outputs={batch_size}, targets={targets.size(0)}"
-        )
+    Args:
+        outputs (Tensor): Model predicted logits or scores of shape :math:`(N, C)`.
+        targets (Tensor): Ground-truth class labels of shape :math:`(N)`.
 
-    if targets.dtype not in {
-        torch.uint8,
-        torch.int8,
-        torch.int16,
-        torch.int32,
-        torch.int64,
-    }:
-        raise TypeError(
-            f"targets must contain integer class indices, got dtype={targets.dtype}"
-        )
+    Returns:
+        float: Top-1 accuracy in :math:`[0.0, 1.0]`. If batch size :math:`N = 0`, returns ``0.0``.
 
+    Examples::
+
+        >>> outputs = torch.tensor([[2.0, 0.5], [0.1, 3.0]])
+        >>> targets = torch.tensor([0, 1])
+        >>> calculate_accuracy(outputs, targets)
+        1.0
+    """
+    batch_size = outputs.size(0)
     if batch_size == 0:
         return 0.0
-
-    min_target = targets.min().item()
-    max_target = targets.max().item()
-
-    if min_target < 0 or max_target >= num_classes:
-        raise ValueError(
-            "targets contain an invalid class index: "
-            f"valid range is [0, {num_classes - 1}], "
-            f"got range [{min_target}, {max_target}]"
-        )
 
     predictions = outputs.argmax(dim=1)
     correct = (predictions == targets).sum().item()
 
     return correct / batch_size
+
+
+__all__ = [
+    "AverageMeter",
+    "calculate_accuracy",
+]

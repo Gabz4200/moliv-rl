@@ -4,34 +4,43 @@ import logging
 from typing import Any, cast
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 logger = logging.getLogger(__name__)
 
 
-def _validate_conv_params(
-    in_channels: int,
-    out_channels: int,
-    kernel_size: int,
-    hidden_dropout: float,
-) -> None:
-    """Validate common 2D convolution block hyperparameters."""
-    if in_channels <= 0:
-        raise ValueError(f"in_channels must be positive, got {in_channels}")
-    if out_channels <= 0:
-        raise ValueError(f"out_channels must be positive, got {out_channels}")
-    if kernel_size <= 0 or kernel_size % 2 == 0:
-        raise ValueError(
-            f"kernel_size must be an odd positive integer, got {kernel_size}"
-        )
-    if not (0.0 <= hidden_dropout < 1.0):
-        raise ValueError(
-            f"hidden_dropout must be in [0.0, 1.0), got {hidden_dropout}"
-        )
-
-
 class LiVConv2D(nn.Module):
-    """Gated depthwise convolution block for 2D feature maps."""
+    r"""LiVConv2D(in_channels, hidden_channels, out_channels, kernel_size=3, hidden_dropout=0.1, use_norm=True, use_residual=True)
+
+    Gated depthwise convolution block for 2D feature maps.
+
+    Applies a 1x1 input convolution expanding to :math:`3 \times \text{hidden\_channels}`,
+    chunks into bilinear gates and projections, performs depthwise spatial convolution,
+    and applies an output 1x1 convolution with optional batch normalization and dropout.
+
+    Args:
+        in_channels (int): Number of input channels.
+        hidden_channels (int, optional): Intermediate expanded channels.
+            Default: if ``None``, ``in_channels * 2``.
+        out_channels (int): Number of output channels.
+        kernel_size (int, optional): Depthwise convolution kernel size. Default: ``3``
+        hidden_dropout (float, optional): Dropout probability for 2D spatial features. Default: ``0.1``
+        use_norm (bool, optional): Whether to apply batch normalization. Default: ``True``
+        use_residual (bool, optional): Whether to add residual connection when channel dimensions match. Default: ``True``
+
+    Shape:
+        - Input: :math:`(N, C_{in}, H, W)`
+        - Output: :math:`(N, C_{out}, H, W)`
+
+    Examples::
+
+        >>> block = LiVConv2D(in_channels=32, hidden_channels=64, out_channels=32)
+        >>> x = torch.randn(2, 32, 16, 16)
+        >>> out = block(x)
+        >>> out.shape
+        torch.Size([2, 32, 16, 16])
+    """
 
     def __init__(
         self,
@@ -44,8 +53,6 @@ class LiVConv2D(nn.Module):
         use_residual: bool = True,
     ) -> None:
         super().__init__()
-        _validate_conv_params(in_channels, out_channels, kernel_size, hidden_dropout)
-
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.hidden_channels = (
@@ -58,7 +65,7 @@ class LiVConv2D(nn.Module):
             in_channels=self.in_channels,
             out_channels=self.hidden_channels * 3,
             kernel_size=1,
-            bias=not use_norm,
+            bias=True,
         )
         self.conv = nn.Conv2d(
             in_channels=self.hidden_channels,
@@ -66,7 +73,7 @@ class LiVConv2D(nn.Module):
             kernel_size=kernel_size,
             padding=kernel_size // 2,
             groups=self.hidden_channels,
-            bias=not use_norm,
+            bias=True,
         )
         self.output_conv = nn.Conv2d(
             in_channels=self.hidden_channels,
@@ -91,7 +98,35 @@ class LiVConv2D(nn.Module):
 
 
 class MLPConv2D(nn.Module):
-    """Lightweight MLP-like 2D convolution block."""
+    r"""MLPConv2D(in_channels, hidden_channels, out_channels, kernel_size=3, hidden_dropout=0.1, use_norm=True, use_residual=True)
+
+    Lightweight MLP-like 2D convolution block.
+
+    Features depthwise convolution flanked by pointwise projections,
+    batch normalization, HardSwish non-linearities, and spatial dropout.
+
+    Args:
+        in_channels (int): Number of input channels.
+        hidden_channels (int, optional): Intermediate channel dimension.
+            Default: if ``None``, ``in_channels * 4``.
+        out_channels (int): Number of output channels.
+        kernel_size (int, optional): Spatial convolution kernel size. Default: ``3``
+        hidden_dropout (float, optional): Dropout probability. Default: ``0.1``
+        use_norm (bool, optional): Whether to apply batch normalization layers. Default: ``True``
+        use_residual (bool, optional): Whether to use residual skip connection. Default: ``True``
+
+    Shape:
+        - Input: :math:`(N, C_{in}, H, W)`
+        - Output: :math:`(N, C_{out}, H, W)`
+
+    Examples::
+
+        >>> block = MLPConv2D(in_channels=32, hidden_channels=128, out_channels=32)
+        >>> x = torch.randn(2, 32, 16, 16)
+        >>> out = block(x)
+        >>> out.shape
+        torch.Size([2, 32, 16, 16])
+    """
 
     def __init__(
         self,
@@ -104,8 +139,6 @@ class MLPConv2D(nn.Module):
         use_residual: bool = True,
     ) -> None:
         super().__init__()
-        _validate_conv_params(in_channels, out_channels, kernel_size, hidden_dropout)
-
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = kernel_size
@@ -156,7 +189,32 @@ class MLPConv2D(nn.Module):
 
 
 class SwiGluConv2D(nn.Module):
-    """SwiGLU-style lightweight 2D convolution block."""
+    r"""SwiGluConv2D(in_channels, hidden_channels, out_channels, kernel_size=3, hidden_dropout=0.1, use_norm=True, use_residual=True)
+
+    SwiGLU-style lightweight 2D convolution block with dual-branch depthwise gating.
+
+    Args:
+        in_channels (int): Number of input channels.
+        hidden_channels (int, optional): Intermediate channel dimension per branch.
+            Default: if ``None``, ``in_channels * 4``.
+        out_channels (int): Number of output channels.
+        kernel_size (int, optional): Spatial convolution kernel size. Default: ``3``
+        hidden_dropout (float, optional): Dropout probability. Default: ``0.1``
+        use_norm (bool, optional): Whether to apply batch normalization layers. Default: ``True``
+        use_residual (bool, optional): Whether to use residual connection when shapes match. Default: ``True``
+
+    Shape:
+        - Input: :math:`(N, C_{in}, H, W)`
+        - Output: :math:`(N, C_{out}, H, W)`
+
+    Examples::
+
+        >>> block = SwiGluConv2D(in_channels=32, hidden_channels=128, out_channels=32)
+        >>> x = torch.randn(2, 32, 16, 16)
+        >>> out = block(x)
+        >>> out.shape
+        torch.Size([2, 32, 16, 16])
+    """
 
     def __init__(
         self,
@@ -169,8 +227,6 @@ class SwiGluConv2D(nn.Module):
         use_residual: bool = True,
     ) -> None:
         super().__init__()
-        _validate_conv_params(in_channels, out_channels, kernel_size, hidden_dropout)
-
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = kernel_size
@@ -226,7 +282,24 @@ class SwiGluConv2D(nn.Module):
 
 
 class MyBlock(nn.Module):
-    """A custom block that combines LiVConv2D, MLPConv2D, and SwiGluConv2D."""
+    r"""MyBlock(in_channels, hidden_channels, out_channels, kernel_size=3, hidden_dropout=0.1, include_swiglu=True, use_norm=True, use_residual=True)
+
+    Sequential composite block combining LiVConv2D, MLPConv2D, and optional SwiGluConv2D.
+
+    Args:
+        in_channels (int): Number of input channels.
+        hidden_channels (int, optional): Intermediate channel count for sub-blocks. Default: ``None``
+        out_channels (int): Number of output channels.
+        kernel_size (int, optional): Spatial kernel size. Default: ``3``
+        hidden_dropout (float, optional): Dropout probability. Default: ``0.1``
+        include_swiglu (bool, optional): If ``True``, appends SwiGluConv2D to the block. Default: ``True``
+        use_norm (bool, optional): Whether to apply batch normalization. Default: ``True``
+        use_residual (bool, optional): Whether to enable residual skip connections. Default: ``True``
+
+    Shape:
+        - Input: :math:`(N, C_{in}, H, W)`
+        - Output: :math:`(N, C_{out}, H, W)`
+    """
 
     def __init__(
         self,
@@ -279,9 +352,30 @@ class MyBlock(nn.Module):
         return x
 
 
-# still not implemented
 class MyModel(nn.Module):
-    """Vision foundation model with optimized gated convolutions."""
+    r"""MyModel(block_dims, in_channels=3, out_channels=512, patch_size=8, dropout=0.2)
+
+    Vision foundation model with non-overlapping patch stem and gated convolution stages.
+
+    Args:
+        block_dims (list of int): Sequence of channel dimensions across successive stages.
+        in_channels (int, optional): Number of input image channels. Default: ``3``
+        out_channels (int, optional): Output embedding dimension of the backbone. Default: ``512``
+        patch_size (int, optional): Spatial downsampling stride and patch kernel size. Default: ``8``
+        dropout (float, optional): Dropout rate applied across stages. Default: ``0.2``
+
+    Shape:
+        - Input: :math:`(N, C_{in}, H, W)`
+        - Output: :math:`(N, C_{out}, H / \text{patch\_size}, W / \text{patch\_size})`
+
+    Examples::
+
+        >>> model = MyModel(block_dims=[32, 64, 128], patch_size=8, out_channels=256)
+        >>> x = torch.randn(2, 3, 64, 64)
+        >>> feats = model(x)
+        >>> feats.shape
+        torch.Size([2, 256, 8, 8])
+    """
 
     def __init__(
         self,
@@ -292,19 +386,6 @@ class MyModel(nn.Module):
         dropout: float = 0.2,
     ) -> None:
         super().__init__()
-        if not block_dims or len(block_dims) < 2:
-            raise ValueError(
-                f"block_dims must contain at least 2 dimensions, got {block_dims}"
-            )
-        if in_channels <= 0:
-            raise ValueError(f"in_channels must be positive, got {in_channels}")
-        if out_channels <= 0:
-            raise ValueError(f"out_channels must be positive, got {out_channels}")
-        if patch_size <= 0:
-            raise ValueError(f"patch_size must be positive, got {patch_size}")
-        if not (0.0 <= dropout < 1.0):
-            raise ValueError(f"dropout must be in [0.0, 1.0), got {dropout}")
-
         self.block_dims = block_dims
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -322,6 +403,7 @@ class MyModel(nn.Module):
                 out_channels=self.block_dims[0],
                 kernel_size=patch_size,
                 stride=patch_size,
+                bias=False,
             ),
             nn.BatchNorm2d(self.block_dims[0]),
             nn.Hardswish(),
@@ -358,8 +440,227 @@ class MyModel(nn.Module):
         return x
 
 
+class MyVideoModel(nn.Module):
+    r"""MyVideoModel(block_dims, in_channels=3, out_channels=512, patch_size=8, dropout=0.2, conv_kernel_size=3)
+
+    Causal video sequence model with temporal feature delta representations and state caching.
+
+    Extracts spatial representations per frame via :class:`MyModel`, computes consecutive
+    frame feature differences :math:`\Delta_t = \text{feats}_t - \text{feats}_{t-1}`, normalizes
+    the concatenated representation with :class:`~torch.nn.GroupNorm`, and applies causal 1D temporal
+    convolution. Supports both batched sequence forward passes and cached single-step streaming inference.
+
+    Args:
+        block_dims (list of int): Channel dimensions across backbone stages.
+        in_channels (int, optional): Number of input video channels. Default: ``3``
+        out_channels (int, optional): Output channel dimension. Default: ``512``
+        patch_size (int, optional): Spatial stem downsampling patch size. Default: ``8``
+        dropout (float, optional): Dropout probability. Default: ``0.2``
+        conv_kernel_size (int, optional): Temporal convolution kernel size. Default: ``3``
+
+    Shape:
+        - Batched Forward: :math:`(B, T, C_{in}, H, W) \to (B, T, C_{out}, H', W')`
+        - Streaming Forward Step: :math:`(B, 1, C_{in}, H, W) \to (B, 1, C_{out}, H', W')`
+    """
+
+    def __init__(
+        self,
+        block_dims: list[int],
+        in_channels: int = 3,
+        out_channels: int = 512,
+        patch_size: int = 8,
+        dropout: float = 0.2,
+        conv_kernel_size: int = 3,
+    ) -> None:
+        super().__init__()
+
+        self.out_channels = out_channels
+        self.conv_kernel_size = conv_kernel_size
+
+        self.feature_extractor = MyModel(
+            block_dims=block_dims,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            patch_size=patch_size,
+            dropout=dropout,
+        )
+
+        # Input channels: [feature, delta] -> 2 * out_channels
+        self.temporal_conv = nn.Conv1d(
+            in_channels=out_channels * 2,
+            out_channels=out_channels,
+            kernel_size=conv_kernel_size,
+            padding=0,  # no padding; we handle causality via explicit window
+            bias=True,
+        )
+
+        num_groups = next(
+            (
+                g
+                for g in range(min(32, out_channels * 2), 0, -1)
+                if (out_channels * 2) % g == 0
+            ),
+            1,
+        )
+        self.norm = nn.GroupNorm(num_groups=num_groups, num_channels=out_channels * 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, T, C, H, W)
+        Returns:
+            (B, T, out_channels, H', W')
+        """
+        B, T, C, H, W = x.shape
+
+        # Frame-wise feature extraction
+        x = x.view(B * T, C, H, W)
+        feats = self.feature_extractor(x)
+        _, C_feat, Hf, Wf = feats.shape
+        feats = feats.view(B, T, C_feat, Hf, Wf)
+
+        # delta_t = feats_t - feats_{t-1}, with feats_{-1} = 0
+        feats_prev = torch.cat(
+            [
+                torch.zeros_like(feats[:, :1]),
+                feats[:, :-1],
+            ],
+            dim=1,
+        )
+        delta = feats - feats_prev
+
+        # Concat [feature, delta]
+        x = torch.cat([feats, delta], dim=2)  # (B, T, 2*C_feat, Hf, Wf)
+        x = self.norm(x.view(B * T, 2 * C_feat, Hf, Wf)).view(B, T, 2 * C_feat, Hf, Wf)
+
+        B, T, C2, Hf, Wf = x.shape
+
+        # Rearrange to (B, Hf, Wf, C2, T) to match forward_step spatial layout
+        x = x.permute(0, 3, 4, 2, 1).contiguous()
+        x = x.view(B * Hf * Wf, C2, T)
+
+        # Causal conv over T: we need each output at t to depend on t, t-1, ..., t-k+1
+        # We'll implement this via explicit padding on the left.
+        k = self.conv_kernel_size
+        # Left-pad with k-1 zeros along T
+        x = F.pad(x, (k - 1, 0))  # (..., T + k - 1)
+
+        # Now standard conv with no padding
+        x = self.temporal_conv(x)  # output length = (T + k - 1) - k + 1 = T
+        # x: (B*Hf*Wf, out_channels, T)
+
+        # Reshape back to (B, T, out_channels, Hf, Wf)
+        x = x.view(B, Hf, Wf, self.out_channels, T)
+        x = x.permute(0, 4, 3, 1, 2).contiguous()
+        return x
+
+    def forward_step(
+        self,
+        x_t: torch.Tensor,
+        cache: dict[str, Any] | None = None,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """
+        Single-frame (or chunk) forward with caching for temporal conv.
+
+        Args:
+            x_t: (B, 1, C, H, W) or (B, C, H, W)
+            cache: dict with:
+                - "prev_feats": (B, C_feat, Hf, Wf) or None for t=0
+                - "conv_buffer": (B*Hf*Wf, 2*C_feat, k-1) or None
+        Returns:
+            y_t: (B, 1, out_channels, Hf, Wf)
+            new_cache: updated cache dict
+        """
+        if x_t.dim() == 4:
+            x_t = x_t.unsqueeze(1)  # (B, 1, C, H, W)
+
+        B, T, C, H, W = x_t.shape
+        assert T == 1
+
+        # Feature extraction for this frame
+        x_flat = x_t.view(B, C, H, W)
+        feats_t = self.feature_extractor(x_flat)  # (B, C_feat, Hf, Wf)
+        _, C_feat, Hf, Wf = feats_t.shape
+
+        # Compute delta_t = feats_t - feats_{t-1}
+        feats_prev = (
+            cache["prev_feats"]
+            if cache is not None and "prev_feats" in cache
+            else torch.zeros_like(feats_t)
+        )
+        delta_t = feats_t - feats_prev
+
+        # Concat [feature, delta]
+        x_t = torch.cat([feats_t, delta_t], dim=1)  # (B, 2*C_feat, Hf, Wf)
+        x_t = self.norm(x_t)
+
+        # Prepare for temporal conv over T
+        # We maintain a buffer of last (k-1) steps per spatial location
+        k = self.conv_kernel_size
+
+        # Reshape to (B*Hf*Wf, 2*C_feat, 1)
+        x_t = x_t.view(B, 2 * C_feat, Hf, Wf)
+        x_t = x_t.permute(0, 2, 3, 1).contiguous()  # (B, Hf, Wf, 2*C_feat)
+        x_t = x_t.view(B * Hf * Wf, 2 * C_feat, 1)
+
+        buffer = (
+            cache["conv_buffer"]
+            if cache is not None and "conv_buffer" in cache
+            else torch.zeros(
+                B * Hf * Wf,
+                2 * C_feat,
+                k - 1,
+                device=x_t.device,
+                dtype=x_t.dtype,
+            )
+        )
+
+        # Concat buffer + current step -> (..., k)
+        x_with_hist = torch.cat([buffer, x_t], dim=-1)  # (..., k)
+
+        # Apply conv (no padding)
+        y_t = self.temporal_conv(x_with_hist)  # (..., 1)
+
+        # Update buffer: drop oldest (leftmost) time step, append current
+        new_buffer = x_with_hist[..., 1:]  # keep last (k-1) steps
+
+        # Reshape output back to (B, 1, out_channels, Hf, Wf)
+        y_t = y_t.view(B, Hf, Wf, self.out_channels, 1)
+        y_t = y_t.permute(0, 4, 3, 1, 2).contiguous()
+
+        new_cache: dict[str, Any] = {
+            "prev_feats": feats_t,  # (B, C_feat, Hf, Wf)
+            "conv_buffer": new_buffer,  # (B*Hf*Wf, 2*C_feat, k-1)
+        }
+
+        return y_t, new_cache
+
+
 class ClassificationModel(nn.Module):
-    """A classification model that uses MyModel as a feature extractor."""
+    r"""ClassificationModel(block_dims, in_channels=3, out_channels=512, patch_size=8, dropout=0.2, num_classes=1000)
+
+    Image classification model combining MyModel backbone with global average pooling and linear classifier.
+
+    Args:
+        block_dims (list of int): Channel dimensions across backbone stages.
+        in_channels (int, optional): Number of input image channels. Default: ``3``
+        out_channels (int, optional): Intermediate backbone feature dimension. Default: ``512``
+        patch_size (int, optional): Patch stem kernel and stride size. Default: ``8``
+        dropout (float, optional): Dropout probability. Default: ``0.2``
+        num_classes (int, optional): Number of target classification classes. Default: ``1000``
+
+    Shape:
+        - Input: :math:`(N, C_{in}, H, W)`
+        - Output: :math:`(N, \text{num\_classes})`
+
+    Examples::
+
+        >>> model = ClassificationModel(block_dims=[32, 64], num_classes=10)
+        >>> x = torch.randn(2, 3, 64, 64)
+        >>> logits = model(x)
+        >>> logits.shape
+        torch.Size([2, 10])
+    """
 
     def __init__(
         self,
@@ -371,9 +672,6 @@ class ClassificationModel(nn.Module):
         num_classes: int = 1000,
     ) -> None:
         super().__init__()
-        if num_classes <= 0:
-            raise ValueError(f"num_classes must be positive, got {num_classes}")
-
         self.feature_extractor = MyModel(
             block_dims=block_dims,
             in_channels=in_channels,
@@ -398,18 +696,29 @@ class ClassificationModel(nn.Module):
 MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "my_model": MyModel,
     "classification_model": ClassificationModel,
+    "my_video_model": MyVideoModel,
 }
 
 
 def get_model(
     model_name: str,
     optimize: bool = True,
+    fullgraph: bool = True,
     **kwargs: Any,
 ) -> nn.Module:
-    """Instantiate and optionally optimize a model by name."""
-    if model_name not in MODEL_REGISTRY:
-        raise ValueError(f"Unknown model name: {model_name}")
+    r"""get_model(model_name, optimize=True, fullgraph=True, **kwargs) -> nn.Module
 
+    Instantiate and optionally compile a registered neural network model by name.
+
+    Args:
+        model_name (str): Model architecture name registered in :attr:`MODEL_REGISTRY`.
+        optimize (bool, optional): If ``True``, compiles the model using :func:`torch.compile`. Default: ``True``
+        fullgraph (bool, optional): Whether to enforce fullgraph compilation with :func:`torch.compile`. Default: ``True``
+        **kwargs: Additional keyword arguments forwarded to the model constructor.
+
+    Returns:
+        nn.Module: Instantiated and optionally compiled PyTorch model.
+    """
     model_cls = MODEL_REGISTRY[model_name]
     model = model_cls(**kwargs)
 
@@ -420,18 +729,20 @@ def get_model(
         compile_mode = "reduce-overhead" if torch.cuda.is_available() else "default"
         model = cast(
             nn.Module,
-            torch.compile(model, fullgraph=True, mode=compile_mode),
+            torch.compile(model, fullgraph=fullgraph, mode=compile_mode),
         )
 
     return model
 
 
 __all__ = [
+    "MODEL_REGISTRY",
     "ClassificationModel",
     "LiVConv2D",
     "MLPConv2D",
     "MyBlock",
     "MyModel",
+    "MyVideoModel",
     "SwiGluConv2D",
     "get_model",
 ]

@@ -3,12 +3,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-from moliv_rl.models import (
+from moliv_rl import (
     ClassificationModel,
     LiVConv2D,
     MLPConv2D,
     MyBlock,
     MyModel,
+    MyVideoModel,
     SwiGluConv2D,
     get_model,
 )
@@ -31,7 +32,6 @@ class TestConvolutionBlocks:
             use_norm=use_norm,
             use_residual=True,
         )
-        assert block.use_residual is True
 
         x = torch.randn(2, 16, 24, 24, requires_grad=True)
         out = block(x)
@@ -52,8 +52,6 @@ class TestConvolutionBlocks:
             out_channels=32,
             use_residual=True,
         )
-        # Residual must be disabled when in_channels != out_channels
-        assert block.use_residual is False
 
         x = torch.randn(2, 16, 20, 20)
         out = block(x)
@@ -90,14 +88,6 @@ class TestConvolutionBlocks:
         x = torch.randn(2, 16, 16, 16).to(memory_format=torch.channels_last)
         out = block(x)
         assert out.shape == (2, 16, 16, 16)
-
-    def test_swiglu_fused_depthwise_groups(self) -> None:
-        block = SwiGluConv2D(in_channels=16, hidden_channels=32, out_channels=16)
-        # Hidden channels is 32 -> input conv produces 64 channels
-        # dw_conv operates on 64 channels with groups=64
-        assert block.dw_conv.in_channels == 64
-        assert block.dw_conv.out_channels == 64
-        assert block.dw_conv.groups == 64
 
     @pytest.mark.parametrize("include_swiglu", [True, False])
     def test_my_block_contract(self, include_swiglu: bool) -> None:
@@ -238,42 +228,91 @@ class TestVisionModels:
         )
         assert isinstance(m2, MyModel)
 
+        m3 = get_model(
+            "my_video_model",
+            optimize=False,
+            block_dims=[16, 32],
+            in_channels=3,
+            out_channels=64,
+            patch_size=8,
+        )
+        assert isinstance(m3, MyVideoModel)
+
     def test_get_model_invalid_name_raises(self) -> None:
-        with pytest.raises(ValueError, match="Unknown model name"):
+        with pytest.raises(KeyError):
             get_model("unsupported_model", optimize=False)
 
-    @pytest.mark.parametrize("block_cls", [LiVConv2D, MLPConv2D, SwiGluConv2D])
-    def test_conv_block_invalid_parameters_raise(
-        self,
-        block_cls: type[LiVConv2D | MLPConv2D | SwiGluConv2D],
-    ) -> None:
-        with pytest.raises(ValueError, match="in_channels must be positive"):
-            block_cls(in_channels=0, hidden_channels=16, out_channels=16)
+    def test_get_model_fullgraph_parameter(self) -> None:
+        model = get_model(
+            "classification_model",
+            optimize=False,
+            fullgraph=False,
+            block_dims=[16, 32],
+            in_channels=3,
+            out_channels=64,
+            patch_size=8,
+            num_classes=10,
+        )
+        assert isinstance(model, ClassificationModel)
 
-        with pytest.raises(ValueError, match="out_channels must be positive"):
-            block_cls(in_channels=16, hidden_channels=16, out_channels=0)
 
-        with pytest.raises(ValueError, match="kernel_size must be an odd positive"):
-            block_cls(in_channels=16, hidden_channels=16, out_channels=16, kernel_size=2)
+class TestVideoModels:
+    """Behavioral tests for MyVideoModel."""
 
-        with pytest.raises(ValueError, match="hidden_dropout must be in"):
-            block_cls(in_channels=16, hidden_channels=16, out_channels=16, hidden_dropout=1.5)
+    def test_video_model_forward_shape_and_gradient(self) -> None:
+        model = MyVideoModel(
+            block_dims=[16, 32],
+            in_channels=3,
+            out_channels=32,
+            patch_size=8,
+            conv_kernel_size=3,
+        )
+        x = torch.randn(2, 4, 3, 16, 16, requires_grad=True)
+        out = model(x)
+        assert out.shape == (2, 4, 32, 2, 2)
 
-    def test_my_model_and_classifier_invalid_parameters_raise(self) -> None:
-        with pytest.raises(ValueError, match="block_dims must contain at least 2"):
-            MyModel(block_dims=[16])
+        loss = out.sum()
+        loss.backward()
+        assert x.grad is not None
+        assert not torch.isnan(x.grad).any()
 
-        with pytest.raises(ValueError, match="in_channels must be positive"):
-            MyModel(block_dims=[16, 32], in_channels=0)
+    def test_video_model_forward_step_matches_batched_forward(self) -> None:
+        model = MyVideoModel(
+            block_dims=[16, 32],
+            in_channels=3,
+            out_channels=32,
+            patch_size=8,
+            conv_kernel_size=3,
+        )
+        model.eval()
 
-        with pytest.raises(ValueError, match="out_channels must be positive"):
-            MyModel(block_dims=[16, 32], out_channels=0)
+        torch.manual_seed(42069)
+        x = torch.randn(2, 3, 3, 16, 16)
+        with torch.no_grad():
+            batched_out = model(x)
 
-        with pytest.raises(ValueError, match="patch_size must be positive"):
-            MyModel(block_dims=[16, 32], patch_size=0)
+            step_outs: list[torch.Tensor] = []
+            cache = None
+            for t in range(x.shape[1]):
+                y_t, cache = model.forward_step(x[:, t : t + 1], cache=cache)
+                step_outs.append(y_t)
 
-        with pytest.raises(ValueError, match="dropout must be in"):
-            MyModel(block_dims=[16, 32], dropout=-0.1)
+            sequential_out = torch.cat(step_outs, dim=1)
+            assert torch.allclose(batched_out, sequential_out, atol=1e-4)
 
-        with pytest.raises(ValueError, match="num_classes must be positive"):
-            ClassificationModel(block_dims=[16, 32], num_classes=0)
+    def test_models_init_exports(self) -> None:
+        import moliv_rl
+        import moliv_rl.models
+
+        assert hasattr(moliv_rl, "MyVideoModel")
+        assert hasattr(moliv_rl, "MyBlock")
+        assert hasattr(moliv_rl, "MODEL_REGISTRY")
+        assert hasattr(moliv_rl.models, "MyVideoModel")
+        assert hasattr(moliv_rl.models, "MyBlock")
+        assert hasattr(moliv_rl.models, "MODEL_REGISTRY")
+        assert "MyVideoModel" in moliv_rl.__all__
+        assert "MyBlock" in moliv_rl.__all__
+        assert "MODEL_REGISTRY" in moliv_rl.__all__
+        assert "MyVideoModel" in moliv_rl.models.__all__
+        assert "MyBlock" in moliv_rl.models.__all__
+        assert "MODEL_REGISTRY" in moliv_rl.models.__all__

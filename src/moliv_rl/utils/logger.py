@@ -10,6 +10,18 @@ def get_logger(
     log_dir: Path | str | None = None,
     level: int = logging.INFO,
 ) -> logging.Logger:
+    r"""get_logger(name, log_dir=None, level=logging.INFO) -> logging.Logger
+
+    Create or retrieve a configured logger with stdout and optional rotating file handlers.
+
+    Args:
+        name (str): Identifier name for the logger.
+        log_dir (Path or str, optional): Directory path where log files are written. If ``None``, logs exclusively to stdout. Default: ``None``
+        level (int, optional): Logging verbosity threshold level. Default: ``logging.INFO``
+
+    Returns:
+        logging.Logger: Configured logger instance.
+    """
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False
@@ -39,3 +51,8 @@ def get_logger(
         handler.setLevel(level)
 
     return logger
+
+
+__all__ = [
+    "get_logger",
+]

@@ -13,13 +13,22 @@ from torchvision.datasets import ImageFolder
 
 from moliv_rl.data.transforms import get_val_transforms
 from moliv_rl.metrics import PrecisionAverage
-from moliv_rl.models import get_model
+from moliv_rl.models import MODEL_REGISTRY, get_model
 from moliv_rl.train.trainer import ClassificationTrainer
 from moliv_rl.utils.logger import get_logger
 
 
 def load_config(config_path: Path | str | None) -> dict[str, Any]:
-    """Load configuration from a YAML file if present."""
+    r"""load_config(config_path) -> dict
+
+    Load structured configuration dictionary from a YAML configuration file.
+
+    Args:
+        config_path (Path or str or None): File path to YAML config. If ``None``, returns empty dict.
+
+    Returns:
+        dict: Parsed YAML configuration dictionary.
+    """
     if config_path is None:
         return {}
 
@@ -34,6 +43,13 @@ def load_config(config_path: Path | str | None) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
+    r"""parse_args() -> argparse.Namespace
+
+    Parse evaluation CLI arguments merged with default YAML configuration values.
+
+    Returns:
+        argparse.Namespace: Populated argument namespace.
+    """
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument(
         "--config",
@@ -104,7 +120,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-name",
         type=str,
-        choices=("classification_model", "my_model"),
+        choices=tuple(MODEL_REGISTRY.keys()),
         default=model_cfg.get("name", "classification_model"),
         help="Model architecture name.",
     )
@@ -188,6 +204,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_device(device: str | None) -> torch.device:
+    r"""resolve_device(device) -> torch.device
+
+    Resolve target compute device string or detect the optimal available accelerator.
+
+    Args:
+        device (str or None): Explicit device string (``'cpu'``, ``'cuda'``, ``'mps'``, ``'auto'``) or ``None``.
+
+    Returns:
+        torch.device: Resolved PyTorch device object.
+    """
     if device is not None and device != "auto":
         resolved = torch.device(device)
 
@@ -212,70 +238,24 @@ def resolve_device(device: str | None) -> torch.device:
     return torch.device("cpu")
 
 
-def validate_args(args: argparse.Namespace) -> None:
-    if not args.checkpoint.is_file():
-        raise FileNotFoundError(f"Checkpoint file not found: {args.checkpoint}")
-
-    if args.batch_size <= 0:
-        raise ValueError(f"batch_size must be positive, got {args.batch_size}")
-
-    if args.num_workers < 0:
-        raise ValueError(f"num_workers must be non-negative, got {args.num_workers}")
-
-    if args.num_classes <= 0:
-        raise ValueError(f"num_classes must be positive, got {args.num_classes}")
-
-    if args.in_channels <= 0:
-        raise ValueError(f"in_channels must be positive, got {args.in_channels}")
-
-    if args.out_channels <= 0:
-        raise ValueError(f"out_channels must be positive, got {args.out_channels}")
-
-    if args.patch_size <= 0:
-        raise ValueError(f"patch_size must be positive, got {args.patch_size}")
-
-    if args.dropout < 0.0 or args.dropout >= 1.0:
-        raise ValueError(f"dropout must be in [0.0, 1.0), got {args.dropout}")
-
-    if len(args.block_dims) < 2:
-        raise ValueError(
-            f"block_dims must contain at least 2 dimensions, got {args.block_dims}"
-        )
-
-    if any(dim <= 0 for dim in args.block_dims):
-        raise ValueError(f"All block_dims must be positive, got {args.block_dims}")
-
-    if args.image_size <= 0:
-        raise ValueError(f"image_size must be positive, got {args.image_size}")
-
-    if not args.split:
-        raise ValueError("split must not be empty")
-
-
 def create_dataset(args: argparse.Namespace) -> ImageFolder:
+    r"""create_dataset(args) -> ImageFolder
+
+    Create an :class:`~torchvision.datasets.ImageFolder` dataset for the specified evaluation split.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments containing data directory and split name.
+
+    Returns:
+        ImageFolder: Instantiated dataset for evaluation.
+    """
     split_dir = args.data_dir / args.split
-
-    if not split_dir.is_dir():
-        raise FileNotFoundError(f"Evaluation split directory not found: {split_dir}")
-
-    dataset = ImageFolder(
+    return ImageFolder(
         root=split_dir,
         transform=get_val_transforms(
             image_size=args.image_size,
         ),
     )
-
-    if len(dataset) == 0:
-        raise ValueError(f"No images found in evaluation split: {split_dir}")
-
-    if len(dataset.classes) != args.num_classes:
-        raise ValueError(
-            "Dataset class count does not match --num-classes: "
-            f"dataset={len(dataset.classes)}, "
-            f"argument={args.num_classes}"
-        )
-
-    return dataset
 
 
 def create_dataloader(
@@ -283,6 +263,18 @@ def create_dataloader(
     args: argparse.Namespace,
     device: torch.device,
 ) -> DataLoader:
+    r"""create_dataloader(dataset, args, device) -> DataLoader
+
+    Create an evaluation :class:`~torch.utils.data.DataLoader`.
+
+    Args:
+        dataset (ImageFolder): Evaluation dataset instance.
+        args (argparse.Namespace): Parsed CLI arguments containing batch size and worker counts.
+        device (torch.device): Execution device used to infer memory pinning.
+
+    Returns:
+        DataLoader: Configured evaluation DataLoader.
+    """
     pin_memory = (
         args.pin_memory if args.pin_memory is not None else (device.type == "cuda")
     )
@@ -308,6 +300,18 @@ def create_trainer(
     device: torch.device,
     logger: logging.Logger,
 ) -> ClassificationTrainer:
+    r"""create_trainer(args, device, logger) -> ClassificationTrainer
+
+    Build model architecture and evaluation trainer without optimizer state.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments.
+        device (torch.device): Compute device for model placement.
+        logger (logging.Logger): Logger instance for evaluation metrics.
+
+    Returns:
+        ClassificationTrainer: Initialized evaluation trainer.
+    """
     model_kwargs: dict[str, Any] = {
         "block_dims": args.block_dims,
         "in_channels": args.in_channels,
@@ -336,7 +340,6 @@ def create_trainer(
 
 def main() -> None:
     args = parse_args()
-    validate_args(args)
 
     logger = get_logger("evaluate")
     device = resolve_device(args.device)

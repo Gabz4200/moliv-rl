@@ -16,11 +16,29 @@ from ..metrics import PrecisionAverage, calculate_accuracy, calculate_precision
 
 
 class ClassificationTrainer:
-    """Simple multiclass classification trainer.
+    r"""ClassificationTrainer(model, optimizer=None, criterion=None, device=None, scheduler=None, scheduler_interval='epoch', logger=None, use_amp=False)
 
-    Supports device placement, gradient accumulation, optional automatic
-    mixed precision, learning-rate scheduling, DDP-aware accumulation,
-    validation metrics, and checkpointing.
+    Trainer for multiclass image classification models.
+
+    Handles mixed precision via :class:`~torch.amp.GradScaler`, gradient accumulation,
+    DDP-aware gradient synchronization, learning rate schedule stepping, validation metric evaluation,
+    and safe checkpoint persistence.
+
+    Args:
+        model (nn.Module): Neural network model for training and evaluation.
+        optimizer (Optimizer, optional): Optimizer instance. If ``None``, trainer operates in evaluation-only mode. Default: ``None``
+        criterion (nn.Module, optional): Loss function module. Default: :class:`~torch.nn.CrossEntropyLoss`
+        device (torch.device or str, optional): Target execution device. Default: ``'cuda'`` if available else ``'cpu'``
+        scheduler (LRScheduler, optional): Learning rate scheduler instance. Default: ``None``
+        scheduler_interval (str, optional): Scheduler stepping frequency (``'epoch'`` or ``'step'``). Default: ``'epoch'``
+        logger (Logger, optional): Custom logger instance. Default: root logger for module.
+        use_amp (bool, optional): Enable automatic mixed precision on CUDA. Default: ``False``
+
+    Examples::
+
+        >>> model = nn.Linear(10, 2)
+        >>> optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+        >>> trainer = ClassificationTrainer(model=model, optimizer=optimizer)
     """
 
     def __init__(
@@ -34,9 +52,6 @@ class ClassificationTrainer:
         logger: logging.Logger | None = None,
         use_amp: bool = False,
     ) -> None:
-        if scheduler_interval not in {"epoch", "step"}:
-            raise ValueError("scheduler_interval must be 'epoch' or 'step'")
-
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -56,13 +71,14 @@ class ClassificationTrainer:
             enabled=self.use_amp,
         )
 
-    def _autocast(self):
-        if not self.use_amp:
-            return nullcontext()
-
-        return torch.autocast(
-            device_type=self.device.type,
-            dtype=self.amp_dtype,
+    def _autocast(self) -> Any:
+        return (
+            torch.autocast(
+                device_type=self.device.type,
+                dtype=self.amp_dtype,
+            )
+            if self.use_amp
+            else nullcontext()
         )
 
     def _model_for_checkpoint(self) -> nn.Module:
@@ -75,25 +91,26 @@ class ClassificationTrainer:
         epoch: int,
         grad_accum_steps: int = 1,
     ) -> float:
-        """Run one training epoch and return the mean batch loss."""
+        r"""train_epoch(dataloader, epoch, grad_accum_steps=1) -> float
+
+        Execute a single training epoch across all batches in the dataloader.
+
+        Args:
+            dataloader (DataLoader): Training DataLoader yielding ``(inputs, targets)`` batches.
+            epoch (int): Current 1-based epoch counter for progress display and logging.
+            grad_accum_steps (int, optional): Number of micro-batches to accumulate before optimizer step. Default: ``1``
+
+        Returns:
+            float: Average unscaled training loss across all batches in the epoch.
+        """
         if self.optimizer is None:
-            raise ValueError("optimizer is required to run train_epoch")
+            raise ValueError(
+                "ClassificationTrainer.train_epoch requires an optimizer, but self.optimizer is None."
+            )
 
-        if epoch < 1:
-            raise ValueError(f"epoch must be >= 1, got {epoch}")
-
-        if grad_accum_steps < 1:
-            raise ValueError(f"grad_accum_steps must be >= 1, got {grad_accum_steps}")
-
-        try:
-            num_loader_batches = len(dataloader)
-        except TypeError as exc:
-            raise TypeError(
-                "train_epoch requires a dataloader with a defined length"
-            ) from exc
-
+        num_loader_batches = len(dataloader)
         if num_loader_batches == 0:
-            raise ValueError("dataloader must not be empty")
+            return 0.0
 
         optimizer = self.optimizer
         self.model.train()
@@ -125,10 +142,12 @@ class ClassificationTrainer:
             is_last_batch = batch_idx + 1 == num_loader_batches
             should_step = accumulation_count + 1 >= grad_accum_steps or is_last_batch
 
-            sync_context: Any = nullcontext()
             no_sync = getattr(self.model, "no_sync", None)
-            if not should_step and callable(no_sync):
-                sync_context = no_sync()
+            sync_context: Any = (
+                no_sync()
+                if (not should_step and callable(no_sync))
+                else nullcontext()
+            )
 
             with sync_context:
                 with self._autocast():
@@ -137,10 +156,7 @@ class ClassificationTrainer:
                     scaled_loss = loss / grad_accum_steps
 
                 scaled = self.scaler.scale(scaled_loss)
-                if isinstance(scaled, torch.Tensor):
-                    scaled.backward()
-                else:
-                    cast(torch.Tensor, scaled).backward()
+                cast(torch.Tensor, scaled).backward()
 
             accumulation_count += 1
             num_batches += 1
@@ -179,22 +195,20 @@ class ClassificationTrainer:
         *,
         precision_average: PrecisionAverage = "macro",
     ) -> dict[str, float]:
-        """Evaluate a multiclass classifier.
+        r"""evaluate(dataloader, *, precision_average='macro') -> dict
 
-        The model must return logits with shape ``[N, C]`` and targets must
-        have shape ``[N]``.
+        Evaluate the classifier over the given evaluation dataset.
+
+        Args:
+            dataloader (DataLoader): Validation or test DataLoader yielding ``(inputs, targets)`` batches.
+            precision_average (str, optional): Averaging reduction mode for precision (``'macro'``, ``'micro'``, ``'weighted'``). Default: ``'macro'``
+
+        Returns:
+            dict: Evaluation metrics dictionary containing:
+                - ``'val_loss'``: Cross-entropy loss averaged per sample.
+                - ``'val_acc'``: Top-1 classification accuracy in :math:`[0.0, 1.0]`.
+                - ``'val_precision'``: Precision metric matching :attr:`precision_average`.
         """
-        if precision_average not in {
-            "micro",
-            "macro",
-            "weighted",
-        }:
-            raise ValueError(
-                "precision_average must be one of "
-                "'micro', 'macro', or 'weighted'; "
-                f"got {precision_average!r}"
-            )
-
         self.model.eval()
 
         total_loss = 0.0
@@ -219,34 +233,12 @@ class ClassificationTrainer:
                 outputs = self.model(inputs)
                 loss = self.criterion(outputs, targets)
 
-            if outputs.ndim != 2:
-                raise ValueError(
-                    "outputs must have shape [batch_size, num_classes], "
-                    f"got {tuple(outputs.shape)}"
-                )
-
-            if targets.ndim != 1:
-                raise ValueError(
-                    f"targets must have shape [batch_size], got {tuple(targets.shape)}"
-                )
-
             batch_size = targets.size(0)
-
-            if outputs.size(0) != batch_size:
-                raise ValueError(
-                    "Batch size mismatch: "
-                    f"outputs={outputs.size(0)}, "
-                    f"targets={batch_size}"
-                )
-
             total_loss += loss.detach().item() * batch_size
             total_samples += batch_size
 
             all_outputs.append(outputs.detach())
             all_targets.append(targets.detach())
-
-        if total_samples == 0:
-            raise ValueError("dataloader yielded zero samples")
 
         outputs = torch.cat(all_outputs, dim=0)
         targets = torch.cat(all_targets, dim=0)
@@ -284,10 +276,15 @@ class ClassificationTrainer:
         epoch: int,
         extra: dict[str, Any] | None = None,
     ) -> None:
-        """Save model, optimizer, scheduler, AMP, and metadata state."""
-        if epoch < 1:
-            raise ValueError(f"epoch must be >= 1, got {epoch}")
+        r"""save_checkpoint(path, epoch, extra=None) -> None
 
+        Persist current model weights, optimizer state, scheduler state, scaler state, and extra metadata.
+
+        Args:
+            path (Path or str): Target file path for the saved ``.pth`` checkpoint.
+            epoch (int): Current epoch number to record in the checkpoint payload.
+            extra (dict, optional): Extra metadata dictionary to merge into the checkpoint payload. Default: ``None``
+        """
         payload: dict[str, Any] = {
             "epoch": epoch,
             "model_state_dict": (self._model_for_checkpoint().state_dict()),
@@ -327,27 +324,23 @@ class ClassificationTrainer:
         *,
         safe_load: bool = True,
     ) -> dict[str, Any]:
-        """Load a checkpoint and return its stored metadata.
+        r"""load_checkpoint(path, *, safe_load=True) -> dict
 
-        Set ``safe_load=False`` only for trusted checkpoints requiring
-        unrestricted pickle deserialization.
+        Restore model, optimizer, scheduler, and scaler states from a saved checkpoint file.
+
+        Args:
+            path (Path or str): Path to the checkpoint file to load.
+            safe_load (bool, optional): If ``True``, restricts unpickling to primitive types using PyTorch's weights_only loader. Default: ``True``
+
+        Returns:
+            dict: The deserialized checkpoint dictionary containing restored metadata and state dicts.
         """
         source = Path(path)
-
-        if not source.is_file():
-            raise FileNotFoundError(f"checkpoint not found at {source}")
-
         checkpoint = torch.load(
             source,
             map_location=self.device,
             weights_only=safe_load,
         )
-
-        if not isinstance(checkpoint, dict):
-            raise TypeError("checkpoint must contain a dictionary")
-
-        if "model_state_dict" not in checkpoint:
-            raise KeyError("checkpoint is missing 'model_state_dict'")
 
         self._model_for_checkpoint().load_state_dict(checkpoint["model_state_dict"])
 
@@ -367,3 +360,8 @@ class ClassificationTrainer:
         )
 
         return checkpoint
+
+
+__all__ = [
+    "ClassificationTrainer",
+]

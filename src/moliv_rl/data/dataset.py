@@ -14,7 +14,17 @@ def get_default_datasets(
     data_dir: Path | str = "data",
     image_size: int = 64,
 ) -> tuple[ImageFolder, ImageFolder]:
-    """Create train and validation ImageFolder datasets on demand."""
+    r"""get_default_datasets(data_dir='data', image_size=64) -> Tuple[ImageFolder, ImageFolder]
+
+    Create train and validation :class:`~torchvision.datasets.ImageFolder` datasets on demand.
+
+    Args:
+        data_dir (Path or str, optional): Root directory path containing ``'train'`` and ``'val'`` subdirectories. Default: ``'data'``
+        image_size (int, optional): Spatial image resolution for dataset transform pipelines. Default: ``64``
+
+    Returns:
+        tuple: A pair ``(train_dataset, val_dataset)`` of instantiated :class:`~torchvision.datasets.ImageFolder` objects.
+    """
     root = Path(data_dir)
     train_ds = ImageFolder(
         root=str(root / "train"),
@@ -39,7 +49,25 @@ def get_dataloaders(
     data_dir: Path | str = "data",
     image_size: int = 64,
 ) -> tuple[DataLoader, DataLoader]:
-    """Creates hardware-optimized DataLoaders."""
+    r"""get_dataloaders(batch_size=32, num_workers=4, train_dataset=None, val_dataset=None, pin_memory=True, persistent_workers=None, generator=None, worker_init_fn=None, data_dir='data', image_size=64) -> Tuple[DataLoader, DataLoader]
+
+    Create hardware-optimized :class:`~torch.utils.data.DataLoader` instances for training and validation.
+
+    Args:
+        batch_size (int, optional): Mini-batch size per iteration. Default: ``32``
+        num_workers (int, optional): Number of asynchronous worker subprocesses. Default: ``4``
+        train_dataset (Dataset, optional): Custom training dataset. If ``None``, loads from :attr:`data_dir`. Default: ``None``
+        val_dataset (Dataset, optional): Custom validation dataset. If ``None``, loads from :attr:`data_dir`. Default: ``None``
+        pin_memory (bool, optional): Pin host memory to expedite host-to-device CUDA copies. Default: ``True``
+        persistent_workers (bool, optional): Maintain active worker processes between epochs. Default: ``True`` when ``num_workers > 0``
+        generator (Generator, optional): PyTorch random number generator for batch shuffling determinism. Default: ``None``
+        worker_init_fn (callable, optional): Worker seeding initialization function. Default: ``None``
+        data_dir (Path or str, optional): Root dataset directory used if datasets are omitted. Default: ``'data'``
+        image_size (int, optional): Image resolution applied to default dataset transforms. Default: ``64``
+
+    Returns:
+        tuple: A pair ``(train_loader, val_loader)`` of configured :class:`~torch.utils.data.DataLoader` objects.
+    """
     train_ds = train_dataset
     val_ds = val_dataset
 

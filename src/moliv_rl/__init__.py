@@ -18,6 +18,7 @@ from .metrics import (
     calculate_precision,
 )
 from .models import (
+    MODEL_REGISTRY,
     ClassificationModel,
     HardSigmoid,
     HardSwish,
@@ -25,7 +26,9 @@ from .models import (
     LiVConv2D,
     MLPConv2D,
     MobileNetV3,
+    MyBlock,
     MyModel,
+    MyVideoModel,
     SEModule,
     SwiGluConv2D,
     get_model,
@@ -38,6 +41,7 @@ from .utils import get_logger, seed_worker, set_seeds
 __all__ = [
     "IMAGENET_MEAN",
     "IMAGENET_STD",
+    "MODEL_REGISTRY",
     "AverageMeter",
     "ClassificationModel",
     "ClassificationTrainer",
@@ -48,7 +52,9 @@ __all__ = [
     "LiVConv2D",
     "MLPConv2D",
     "MobileNetV3",
+    "MyBlock",
     "MyModel",
+    "MyVideoModel",
     "PrecisionAverage",
     "Reduction",
     "SEModule",

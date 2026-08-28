@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -11,54 +9,123 @@ from torch import nn
 
 
 class HardSwish(nn.Module):
-    """h-swish[x] = x * ReLU6(x + 3) / 6"""
+    r"""HardSwish(inplace=False)
 
-    def __init__(self, inplace: bool = False):
+    Applies the hardswish function element-wise as defined in `Searching for MobileNetV3`_.
+
+    .. math::
+        \text{Hardswish}(x) = x \cdot \frac{\text{ReLU6}(x + 3)}{6}
+
+    Args:
+        inplace (bool, optional): Can optionally do the operation in-place. Default: ``False``
+
+    Shape:
+        - Input: :math:`(*)`, where :math:`*` means any number of dimensions.
+        - Output: :math:`(*)`, same shape as the input.
+
+    Examples::
+
+        >>> m = HardSwish()
+        >>> input = torch.randn(2)
+        >>> output = m(input)
+
+    .. _`Searching for MobileNetV3`:
+        https://arxiv.org/abs/1905.02244
+    """
+
+    def __init__(self, inplace: bool = False) -> None:
         super().__init__()
         self.inplace = inplace
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Apply h-swish: x * ReLU6(x + 3) / 6
-        if self.inplace:
-            return x.mul_(F.relu6(x.add(3.0), inplace=True) / 6.0)
-        return x * F.relu6(x + 3.0) / 6.0
+        return (
+            x.mul_(F.relu6(x.add(3.0), inplace=True) / 6.0)
+            if self.inplace
+            else x * F.relu6(x + 3.0) / 6.0
+        )
 
 
 class HardSigmoid(nn.Module):
-    """h-sigmoid[x] = ReLU6(x + 3) / 6"""
+    r"""HardSigmoid(inplace=False)
 
-    def __init__(self, inplace: bool = False):
+    Applies the hardsigmoid function element-wise as defined in `Searching for MobileNetV3`_.
+
+    .. math::
+        \text{Hardsigmoid}(x) = \frac{\text{ReLU6}(x + 3)}{6}
+
+    Args:
+        inplace (bool, optional): Can optionally do the operation in-place. Default: ``False``
+
+    Shape:
+        - Input: :math:`(*)`, where :math:`*` means any number of dimensions.
+        - Output: :math:`(*)`, same shape as the input.
+
+    Examples::
+
+        >>> m = HardSigmoid()
+        >>> input = torch.randn(2)
+        >>> output = m(input)
+
+    .. _`Searching for MobileNetV3`:
+        https://arxiv.org/abs/1905.02244
+    """
+
+    def __init__(self, inplace: bool = False) -> None:
         super().__init__()
         self.inplace = inplace
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Apply h-sigmoid: ReLU6(x + 3) / 6
-        if self.inplace:
-            return F.relu6(x.add(3.0), inplace=True).div_(6.0)
-        return F.relu6(x + 3.0) / 6.0
+        return (
+            F.relu6(x.add(3.0), inplace=True).div_(6.0)
+            if self.inplace
+            else F.relu6(x + 3.0) / 6.0
+        )
+
+
+ACT_MAP: dict[str, type[nn.Module]] = {
+    "RE": nn.ReLU,
+    "HS": HardSwish,
+}
 
 
 def make_act(name: str, inplace: bool = False) -> nn.Module:
+    r"""make_act(name, inplace=False) -> nn.Module
+
+    Instantiate activation layer by paper code name ('RE' for ReLU, 'HS' for HardSwish).
+
+    Args:
+        name (str): Activation identifier ('RE' or 'HS').
+        inplace (bool, optional): In-place activation execution. Default: ``False``
+
+    Returns:
+        nn.Module: Instantiated activation layer.
     """
-    Activation names as in the paper:
-      'RE' -> ReLU
-      'HS' -> HardSwish
-    """
-    if name == "RE":
-        return nn.ReLU(inplace=inplace)
-    if name == "HS":
-        return HardSwish(inplace=inplace)
-    raise ValueError(f"Unknown activation name: {name}")
+    return ACT_MAP[name](inplace=inplace)
 
 
 class SEModule(nn.Module):
-    """
-    Squeeze-and-Excite as used in MobileNetV3:
-    - Global average pool
-    - 1x1 conv (reduce) -> ReLU
-    - 1x1 conv (expand) -> hard-sigmoid
-    - scale = x * gate
-    Reduction is fixed to 1/4 of the expansion channels (Section 5.3).
+    r"""SEModule(channels, reduction=4)
+
+    Squeeze-and-Excitation attention module for MobileNetV3 architectures.
+
+    Applies global average pooling followed by a two-layer 1x1 convolution
+    bottleneck with ReLU and HardSigmoid gating to recalibrate channel features.
+
+    Args:
+        channels (int): Number of input/output channels.
+        reduction (int, optional): Squeeze reduction divisor. Default: ``4``
+
+    Shape:
+        - Input: :math:`(N, C, H, W)`
+        - Output: :math:`(N, C, H, W)`
+
+    Examples::
+
+        >>> se = SEModule(channels=64, reduction=4)
+        >>> x = torch.randn(2, 64, 16, 16)
+        >>> out = se(x)
+        >>> out.shape
+        torch.Size([2, 64, 16, 16])
     """
 
     def __init__(self, channels: int, reduction: int = 4):
@@ -92,16 +159,22 @@ class SEModule(nn.Module):
 
 
 class InvertedResidual(nn.Module):
-    """
-    MobileNetV3 bottleneck block (bneck) as in Tables 1 & 2 and Fig. 4.
+    r"""InvertedResidual(in_channels, out_channels, kernel, stride, exp_size, use_se, nl)
 
+    MobileNetV3 inverted residual bottleneck block with depthwise convolution.
 
-    Structure:
-      - 1x1 expand -> BN -> NL
-      - kxk depthwise -> BN -> NL
-      - SE (optional)
-      - 1x1 project -> BN (no NL)
-      - residual if stride==1 and in_channels == out_channels
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        kernel (int): Depthwise convolution kernel size (3 or 5).
+        stride (int): Stride for spatial downsampling (1 or 2).
+        exp_size (int): Number of expanded intermediate channels.
+        use_se (bool): If ``True``, applies Squeeze-and-Excitation attention.
+        nl (str): Activation type identifier ('RE' or 'HS').
+
+    Shape:
+        - Input: :math:`(N, C_{in}, H_{in}, W_{in})`
+        - Output: :math:`(N, C_{out}, H_{out}, W_{out})`
     """
 
     def __init__(
@@ -115,11 +188,6 @@ class InvertedResidual(nn.Module):
         nl: str,
     ):
         super().__init__()
-        if stride not in (1, 2):
-            raise ValueError(f"stride must be 1 or 2, got {stride}")
-        if kernel not in (3, 5):
-            raise ValueError(f"kernel must be 3 or 5 for MobileNetV3, got {kernel}")
-
         self.use_res_connect = stride == 1 and in_channels == out_channels
 
         layers: list[nn.Module] = []
@@ -215,6 +283,18 @@ CFG_SMALL: list[tuple[int, int, int, bool, str, int]] = [
 
 
 def _make_divisible(v: float, divisor: int = 8, min_value: int | None = None) -> int:
+    r"""_make_divisible(v, divisor=8, min_value=None) -> int
+
+    Round channel counts to the nearest multiple of divisor while avoiding >10% down-rounding.
+
+    Args:
+        v (float): Raw channel count value.
+        divisor (int, optional): Divisibility divisor. Default: ``8``
+        min_value (int, optional): Minimum bound. Default: ``divisor``
+
+    Returns:
+        int: Divisible channel count.
+    """
     min_val = divisor if min_value is None else min_value
     new_v = max(min_val, int(v + divisor / 2) // divisor * divisor)
     # Ensure the round down does not go down by more than 10%.
@@ -222,10 +302,30 @@ def _make_divisible(v: float, divisor: int = 8, min_value: int | None = None) ->
 
 
 class MobileNetV3(nn.Module):
-    """
-    MobileNetV3 Large / Small following arXiv:1905.02244.
+    r"""MobileNetV3(mode='large', num_classes=1000, width_mult=1.0, input_size=224)
 
+    MobileNetV3 architecture following `Searching for MobileNetV3`_.
 
+    Args:
+        mode (str, optional): Architecture configuration variant ('large' or 'small'). Default: ``'large'``
+        num_classes (int, optional): Number of classification target classes. Default: ``1000``
+        width_mult (float, optional): Channel width multiplier. Default: ``1.0``
+        input_size (int, optional): Expected spatial dimension of input images. Default: ``224``
+
+    Shape:
+        - Input: :math:`(N, 3, H, W)`
+        - Output: :math:`(N, \text{num\_classes})`
+
+    Examples::
+
+        >>> model = MobileNetV3(mode='small', num_classes=10)
+        >>> x = torch.randn(2, 3, 224, 224)
+        >>> logits = model(x)
+        >>> logits.shape
+        torch.Size([2, 10])
+
+    .. _`Searching for MobileNetV3`:
+        https://arxiv.org/abs/1905.02244
     """
 
     def __init__(
@@ -236,21 +336,14 @@ class MobileNetV3(nn.Module):
         input_size: int = 224,
     ):
         super().__init__()
-        if mode not in ("large", "small"):
-            raise ValueError("mode must be 'large' or 'small'")
-
         self.mode = mode
         self.input_size = input_size
         self.num_classes = num_classes
 
-        if mode == "large":
-            cfg = CFG_LARGE
-            last_exp = 960  # channels before pooling (see Table 1)
-            final_exp = 1280  # final expansion after pooling (Fig. 5)
-        else:
-            cfg = CFG_SMALL
-            last_exp = 576  # channels before pooling (Table 2)
-            final_exp = 1024  # final expansion after pooling
+        cfg, last_exp, final_exp = {
+            "large": (CFG_LARGE, 960, 1280),
+            "small": (CFG_SMALL, 576, 1024),
+        }[mode]
 
         # Stem: 3x3 conv, stride 2, 16 channels, h-swish (Section 5.1)
         stem_channels = _make_divisible(16 * width_mult, 8)
@@ -330,12 +423,11 @@ class MobileNetV3(nn.Module):
         # Linear classifier to class logits
         return self.classifier(x)
 
-    def _initialize_weights(self):
-        # Default initialization similar to torchvision / common practice.
+    def _initialize_weights(self) -> None:
+        # Kaiming normal initialization standard for MobileNetV3 architectures.
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-                nn.init.normal_(m.weight, mean=0.0, std=math.sqrt(2.0 / n))
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
             elif isinstance(m, nn.BatchNorm2d):
@@ -351,7 +443,21 @@ def mobilenetv3_large(
     width_mult: float = 1.0,
     input_size: int = 224,
 ) -> MobileNetV3:
-    """MobileNetV3-Large as in Table 1 of the paper."""
+    r"""mobilenetv3_large(num_classes=1000, width_mult=1.0, input_size=224) -> MobileNetV3
+
+    Instantiate MobileNetV3-Large architecture from Table 1 of `Searching for MobileNetV3`_.
+
+    Args:
+        num_classes (int, optional): Number of classification target classes. Default: ``1000``
+        width_mult (float, optional): Width multiplier scaling all layer channels. Default: ``1.0``
+        input_size (int, optional): Expected input image spatial resolution. Default: ``224``
+
+    Returns:
+        MobileNetV3: Configured MobileNetV3-Large model.
+
+    .. _`Searching for MobileNetV3`:
+        https://arxiv.org/abs/1905.02244
+    """
     return MobileNetV3(
         mode="large",
         num_classes=num_classes,
@@ -365,7 +471,21 @@ def mobilenetv3_small(
     width_mult: float = 1.0,
     input_size: int = 224,
 ) -> MobileNetV3:
-    """MobileNetV3-Small as in Table 2 of the paper."""
+    r"""mobilenetv3_small(num_classes=1000, width_mult=1.0, input_size=224) -> MobileNetV3
+
+    Instantiate MobileNetV3-Small architecture from Table 2 of `Searching for MobileNetV3`_.
+
+    Args:
+        num_classes (int, optional): Number of classification target classes. Default: ``1000``
+        width_mult (float, optional): Width multiplier scaling all layer channels. Default: ``1.0``
+        input_size (int, optional): Expected input image spatial resolution. Default: ``224``
+
+    Returns:
+        MobileNetV3: Configured MobileNetV3-Small model.
+
+    .. _`Searching for MobileNetV3`:
+        https://arxiv.org/abs/1905.02244
+    """
     return MobileNetV3(
         mode="small",
         num_classes=num_classes,

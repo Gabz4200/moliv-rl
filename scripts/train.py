@@ -18,7 +18,7 @@ from moliv_rl.data.transforms import (
 )
 from moliv_rl.losses import FocalLoss
 from moliv_rl.metrics import PrecisionAverage
-from moliv_rl.models import get_model
+from moliv_rl.models import MODEL_REGISTRY, get_model
 from moliv_rl.train.trainer import ClassificationTrainer
 from moliv_rl.utils.logger import get_logger
 from moliv_rl.utils.reproducibility import seed_worker, set_seeds
@@ -27,7 +27,16 @@ from moliv_rl.utils.reproducibility import seed_worker, set_seeds
 
 
 def load_config(config_path: Path | str | None) -> dict[str, Any]:
-    """Load configuration from a YAML file if present."""
+    r"""load_config(config_path) -> dict
+
+    Load structured configuration dictionary from a YAML configuration file.
+
+    Args:
+        config_path (Path or str or None): File path to YAML config. If ``None``, returns empty dict.
+
+    Returns:
+        dict: Parsed YAML configuration dictionary.
+    """
     if config_path is None:
         return {}
 
@@ -44,21 +53,34 @@ def load_config(config_path: Path | str | None) -> dict[str, Any]:
 def _serialize_args(
     args: argparse.Namespace | dict[str, Any],
 ) -> dict[str, Any]:
-    """Convert argparse values into checkpoint-safe metadata."""
-    serialized: dict[str, Any] = {}
+    r"""_serialize_args(args) -> dict
+
+    Convert argparse namespace values into primitive types safe for PyTorch checkpoint serialization.
+
+    Args:
+        args (Namespace or dict): Raw CLI parsed arguments or dictionary.
+
+    Returns:
+        dict: Sanitized dictionary with :class:`~pathlib.Path` objects cast to strings.
+    """
     items = vars(args).items() if isinstance(args, argparse.Namespace) else args.items()
-
-    for key, value in items:
-        if isinstance(value, Path):
-            serialized[key] = str(value)
-        else:
-            serialized[key] = value
-
-    return serialized
+    return {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in items
+    }
 
 
 def resolve_device(device: str | None) -> torch.device:
-    """Resolve the requested device or select a reasonable default."""
+    r"""resolve_device(device) -> torch.device
+
+    Resolve target compute device string or detect the optimal available accelerator.
+
+    Args:
+        device (str or None): Explicit device string (``'cpu'``, ``'cuda'``, ``'mps'``, ``'auto'``) or ``None``.
+
+    Returns:
+        torch.device: Resolved PyTorch device object.
+    """
     if device is not None and device != "auto":
         resolved = torch.device(device)
 
@@ -84,6 +106,13 @@ def resolve_device(device: str | None) -> torch.device:
 
 
 def parse_args() -> argparse.Namespace:
+    r"""parse_args() -> argparse.Namespace
+
+    Parse CLI options merged with default YAML configuration settings.
+
+    Returns:
+        argparse.Namespace: Populated argument namespace.
+    """
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument(
         "--config",
@@ -201,7 +230,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-name",
         type=str,
-        choices=("classification_model", "my_model"),
+        choices=tuple(MODEL_REGISTRY.keys()),
         default=model_cfg.get("name", "classification_model"),
         help="Model architecture name.",
     )
@@ -324,78 +353,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def validate_args(args: argparse.Namespace) -> None:
-    if not args.data_dir.is_dir():
-        raise FileNotFoundError(f"Data directory not found: {args.data_dir}")
-
-    if args.epochs <= 0:
-        raise ValueError(f"epochs must be positive, got {args.epochs}")
-
-    if args.batch_size <= 0:
-        raise ValueError(f"batch_size must be positive, got {args.batch_size}")
-
-    if args.lr <= 0:
-        raise ValueError(f"lr must be positive, got {args.lr}")
-
-    if args.weight_decay < 0:
-        raise ValueError(f"weight_decay must be non-negative, got {args.weight_decay}")
-
-    if args.num_classes <= 0:
-        raise ValueError(f"num_classes must be positive, got {args.num_classes}")
-
-    if args.in_channels <= 0:
-        raise ValueError(f"in_channels must be positive, got {args.in_channels}")
-
-    if args.out_channels <= 0:
-        raise ValueError(f"out_channels must be positive, got {args.out_channels}")
-
-    if args.patch_size <= 0:
-        raise ValueError(f"patch_size must be positive, got {args.patch_size}")
-
-    if args.dropout < 0.0 or args.dropout >= 1.0:
-        raise ValueError(f"dropout must be in [0.0, 1.0), got {args.dropout}")
-
-    if len(args.block_dims) < 2:
-        raise ValueError(
-            f"block_dims must contain at least 2 dimensions, got {args.block_dims}"
-        )
-
-    if any(dim <= 0 for dim in args.block_dims):
-        raise ValueError(f"All block_dims must be positive, got {args.block_dims}")
-
-    if args.image_size <= 0:
-        raise ValueError(f"image_size must be positive, got {args.image_size}")
-
-    if args.resize_scale < 1.0:
-        raise ValueError(f"resize_scale must be >= 1.0, got {args.resize_scale}")
-
-    if args.num_workers < 0:
-        raise ValueError(f"num_workers must be non-negative, got {args.num_workers}")
-
-    if args.grad_accum_steps <= 0:
-        raise ValueError(
-            f"grad_accum_steps must be positive, got {args.grad_accum_steps}"
-        )
-
-    if args.eta_min < 0:
-        raise ValueError(f"eta_min must be non-negative, got {args.eta_min}")
-
-    if args.use_amp and args.device == "cpu":
-        raise ValueError("--use-amp requires a CUDA device")
-
-
 def build_datasets(
     args: argparse.Namespace,
 ) -> tuple[ImageFolder, ImageFolder]:
-    """Build train and validation ImageFolder datasets."""
+    r"""build_datasets(args) -> Tuple[ImageFolder, ImageFolder]
+
+    Construct train and validation :class:`~torchvision.datasets.ImageFolder` datasets from CLI arguments.
+
+    Args:
+        args (argparse.Namespace): Parsed experiment configuration.
+
+    Returns:
+        tuple: A pair ``(train_dataset, val_dataset)`` of instantiated datasets.
+    """
     train_dir = args.data_dir / args.train_split
     val_dir = args.data_dir / args.val_split
-
-    if not train_dir.is_dir():
-        raise FileNotFoundError(f"Training split directory not found: {train_dir}")
-
-    if not val_dir.is_dir():
-        raise FileNotFoundError(f"Validation split directory not found: {val_dir}")
 
     train_dataset = ImageFolder(
         root=train_dir,
@@ -413,26 +385,6 @@ def build_datasets(
         ),
     )
 
-    if len(train_dataset) == 0:
-        raise ValueError(f"No training images found in {train_dir}")
-
-    if len(val_dataset) == 0:
-        raise ValueError(f"No validation images found in {val_dir}")
-
-    if train_dataset.class_to_idx != val_dataset.class_to_idx:
-        raise ValueError(
-            "Training and validation class mappings differ: "
-            f"train={train_dataset.class_to_idx}, "
-            f"val={val_dataset.class_to_idx}"
-        )
-
-    if len(train_dataset.classes) != args.num_classes:
-        raise ValueError(
-            "Dataset class count does not match --num-classes: "
-            f"dataset={len(train_dataset.classes)}, "
-            f"argument={args.num_classes}"
-        )
-
     return train_dataset, val_dataset
 
 
@@ -442,7 +394,19 @@ def build_dataloaders(
     args: argparse.Namespace,
     device: torch.device,
 ) -> tuple[DataLoader, DataLoader]:
-    """Build deterministic, seeded train and validation loaders."""
+    r"""build_dataloaders(train_dataset, val_dataset, args, device) -> Tuple[DataLoader, DataLoader]
+
+    Construct hardware-optimized, seeded training and validation DataLoaders.
+
+    Args:
+        train_dataset (ImageFolder): Training dataset instance.
+        val_dataset (ImageFolder): Validation dataset instance.
+        args (argparse.Namespace): Parsed CLI arguments containing batch size, workers, and seed.
+        device (torch.device): Execution device used to infer default memory pinning.
+
+    Returns:
+        tuple: A pair ``(train_loader, val_loader)`` of instantiated DataLoaders.
+    """
     generator = torch.Generator()
     generator.manual_seed(args.seed)
 
@@ -473,7 +437,19 @@ def build_trainer(
     logger: logging.Logger,
     steps_per_epoch: int,
 ) -> ClassificationTrainer:
-    """Build the model, optimizer, scheduler, and trainer."""
+    r"""build_trainer(args, device, logger, steps_per_epoch) -> ClassificationTrainer
+
+    Instantiate model architecture, loss criterion, optimizer, scheduler, and trainer.
+
+    Args:
+        args (argparse.Namespace): Experiment hyperparameter configuration.
+        device (torch.device): Compute device for model placement.
+        logger (logging.Logger): Logger for tracking training progress.
+        steps_per_epoch (int): Total batch steps per epoch used to size step-wise schedulers.
+
+    Returns:
+        ClassificationTrainer: Initialized trainer instance.
+    """
     model_kwargs: dict[str, Any] = {
         "block_dims": args.block_dims,
         "in_channels": args.in_channels,
@@ -559,7 +535,6 @@ def build_trainer(
 
 def main() -> None:
     args = parse_args()
-    validate_args(args)
 
     set_seeds(args.seed)
 

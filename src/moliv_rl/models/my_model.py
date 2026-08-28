@@ -529,6 +529,15 @@ class MyVideoModel(nn.Module):
         )
         delta = feats - feats_prev
 
+        return self._apply_temporal_conv(feats, delta)
+
+    def _apply_temporal_conv(
+        self,
+        feats: torch.Tensor,
+        delta: torch.Tensor,
+    ) -> torch.Tensor:
+        B, T, C_feat, Hf, Wf = feats.shape
+
         # Concat [feature, delta]
         x = torch.cat([feats, delta], dim=2)  # (B, T, 2*C_feat, Hf, Wf)
         x = self.norm(x.view(B * T, 2 * C_feat, Hf, Wf)).view(B, T, 2 * C_feat, Hf, Wf)

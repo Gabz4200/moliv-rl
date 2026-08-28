@@ -9,7 +9,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision.datasets import ImageFolder
 
-from moliv_rl.data import get_dataloaders, get_default_datasets
+from moliv_rl.data import DataLoaderConfig, get_dataloaders, get_default_datasets
 
 
 @pytest.fixture
@@ -37,13 +37,14 @@ class TestDatasetAndDataLoaders:
         assert len(val_ds) == 4
 
     def test_get_dataloaders_default_directory(self, dummy_data_dir: Path) -> None:
-        train_loader, val_loader = get_dataloaders(
+        config = DataLoaderConfig(
             batch_size=2,
             num_workers=0,
             pin_memory=False,
             data_dir=dummy_data_dir,
             image_size=32,
         )
+        train_loader, val_loader = get_dataloaders(config=config)
         assert isinstance(train_loader, DataLoader)
         assert isinstance(val_loader, DataLoader)
         batch = next(iter(train_loader))
@@ -58,12 +59,15 @@ class TestDatasetAndDataLoaders:
         train_ds = TensorDataset(x_train, y_train)
         val_ds = TensorDataset(x_val, y_val)
 
-        train_loader, val_loader = get_dataloaders(
+        config = DataLoaderConfig(
             batch_size=2,
             num_workers=0,
+            pin_memory=False,
+        )
+        train_loader, val_loader = get_dataloaders(
+            config=config,
             train_dataset=train_ds,
             val_dataset=val_ds,
-            pin_memory=False,
         )
 
         assert isinstance(train_loader, DataLoader)

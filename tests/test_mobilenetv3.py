@@ -12,6 +12,7 @@ from moliv_rl.models.mobilenetv3 import (
     InvertedResidual,
     MobileNetV3,
     SEModule,
+    _make_divisible,
     mobilenetv3_large,
     mobilenetv3_small,
 )
@@ -141,3 +142,20 @@ class TestMobileNetV3Model:
     def test_invalid_mode_raises(self) -> None:
         with pytest.raises(KeyError):
             MobileNetV3(mode="medium")
+
+
+class TestMakeDivisible:
+    """Behavioral tests for the channel-divisibility helper."""
+
+    def test_exact_multiple_passthrough(self) -> None:
+        assert _make_divisible(24.0, divisor=8) == 24
+
+    def test_rounds_up_to_divisor(self) -> None:
+        assert _make_divisible(29.0, divisor=8) == 32
+
+    def test_respects_min_value(self) -> None:
+        assert _make_divisible(4.0, divisor=8, min_value=16) == 16
+
+    def test_does_not_down_round_more_than_ten_percent(self) -> None:
+        # 9 would round down to 8, but 8 < 0.9 * 9, so it rounds up to 16.
+        assert _make_divisible(9.0, divisor=8) == 16

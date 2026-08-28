@@ -85,6 +85,23 @@ class ClassificationTrainer:
         """Return the underlying model when wrapped by DDP."""
         return getattr(self.model, "module", self.model)
 
+    def _prepare_batch(
+        self,
+        batch: tuple[torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Transfer a ``(inputs, targets)`` batch to the trainer device."""
+        inputs, targets = batch
+        inputs = inputs.to(
+            self.device,
+            memory_format=torch.channels_last,
+            non_blocking=True,
+        )
+        targets = targets.to(
+            self.device,
+            non_blocking=True,
+        )
+        return inputs, targets
+
     def train_epoch(
         self,
         dataloader: DataLoader,
@@ -127,17 +144,7 @@ class ClassificationTrainer:
         )
 
         for batch_idx, batch in enumerate(progress):
-            inputs, targets = batch
-
-            inputs = inputs.to(
-                self.device,
-                memory_format=torch.channels_last,
-                non_blocking=True,
-            )
-            targets = targets.to(
-                self.device,
-                non_blocking=True,
-            )
+            inputs, targets = self._prepare_batch(batch)
 
             is_last_batch = batch_idx + 1 == num_loader_batches
             should_step = accumulation_count + 1 >= grad_accum_steps or is_last_batch
@@ -217,17 +224,7 @@ class ClassificationTrainer:
         all_targets: list[torch.Tensor] = []
 
         for batch in dataloader:
-            inputs, targets = batch
-
-            inputs = inputs.to(
-                self.device,
-                memory_format=torch.channels_last,
-                non_blocking=True,
-            )
-            targets = targets.to(
-                self.device,
-                non_blocking=True,
-            )
+            inputs, targets = self._prepare_batch(batch)
 
             with self._autocast():
                 outputs = self.model(inputs)

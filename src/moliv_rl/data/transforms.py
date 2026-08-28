@@ -17,6 +17,11 @@ IMAGENET_STD: tuple[float, float, float] = (
 )
 
 
+def _compute_resize_size(image_size: int, resize_scale: float) -> int:
+    """Return the resize dimension used before center-cropping back to ``image_size``."""
+    return max(image_size, round(image_size * resize_scale))
+
+
 def get_train_transforms(
     image_size: int = 64,
     *,
@@ -43,10 +48,7 @@ def get_train_transforms(
 
         >>> transform = get_train_transforms(image_size=224)
     """
-    resize_size = max(
-        image_size,
-        round(image_size * resize_scale),
-    )
+    resize_size = _compute_resize_size(image_size, resize_scale)
 
     return transforms.Compose(
         [
@@ -91,10 +93,7 @@ def get_val_transforms(
 
         >>> transform = get_val_transforms(image_size=224)
     """
-    resize_size = max(
-        image_size,
-        round(image_size * resize_scale),
-    )
+    resize_size = _compute_resize_size(image_size, resize_scale)
 
     return transforms.Compose(
         [
@@ -102,9 +101,7 @@ def get_val_transforms(
                 resize_size,
                 antialias=True,
             ),
-            transforms.CenterCrop(
-                image_size
-            ),  # <- I highly prefer non Crop regularizations instead, like padding or even unassimetric resizing. But since this is only the starter template, I will keep it like that TEMPORARILY.
+            transforms.CenterCrop(image_size),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=mean,

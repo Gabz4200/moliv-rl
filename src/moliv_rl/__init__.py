@@ -5,6 +5,7 @@ from __future__ import annotations
 from .data import (
     IMAGENET_MEAN,
     IMAGENET_STD,
+    DataLoaderConfig,
     get_dataloaders,
     get_default_datasets,
     get_train_transforms,
@@ -45,6 +46,7 @@ __all__ = [
     "AverageMeter",
     "ClassificationModel",
     "ClassificationTrainer",
+    "DataLoaderConfig",
     "FocalLoss",
     "HardSigmoid",
     "HardSwish",

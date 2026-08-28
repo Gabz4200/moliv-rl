@@ -59,10 +59,92 @@ class TestScriptHelpers:
         assert set(eval_script.MODEL_REGISTRY.keys()) == set(MODEL_REGISTRY.keys())
 
 
+@pytest.fixture
+def trained_checkpoint(
+    dummy_dataset_dir: Path,
+    tmp_path: Path,
+) -> Path:
+    """Train one epoch and return the saved best checkpoint path."""
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    train_args = argparse.Namespace(
+        config=None,
+        data_dir=dummy_dataset_dir,
+        checkpoint_dir=checkpoint_dir,
+        train_split="train",
+        val_split="val",
+        epochs=1,
+        batch_size=2,
+        lr=0.01,
+        weight_decay=0.0,
+        optimizer="sgd",
+        loss="cross_entropy",
+        label_smoothing=0.0,
+        scheduler="none",
+        scheduler_interval="epoch",
+        eta_min=0.0,
+        model_name="classification_model",
+        block_dims=[16, 32],
+        in_channels=3,
+        out_channels=32,
+        patch_size=4,
+        dropout=0.1,
+        num_classes=2,
+        optimize_model=False,
+        image_size=32,
+        resize_scale=1.15,
+        num_workers=0,
+        pin_memory=False,
+        persistent_workers=False,
+        seed=42069,
+        grad_accum_steps=1,
+        precision_average="macro",
+        device="cpu",
+        use_amp=False,
+        save_best=True,
+        save_last=True,
+    )
+
+    train_script.set_seeds(train_args.seed)
+    device = train_script.resolve_device(train_args.device)
+    logger = train_script.get_logger("test_train_pipeline")
+
+    train_ds, val_ds = train_script.build_datasets(train_args)
+    train_loader, val_loader = train_script.build_dataloaders(
+        train_dataset=train_ds,
+        val_dataset=val_ds,
+        args=train_args,
+        device=device,
+    )
+
+    trainer = train_script.build_trainer(
+        args=train_args,
+        device=device,
+        logger=logger,
+        steps_per_epoch=len(train_loader),
+    )
+
+    train_loss = trainer.train_epoch(train_loader, epoch=1)
+    assert isinstance(train_loss, float)
+
+    val_metrics = trainer.evaluate(val_loader)
+    assert "val_acc" in val_metrics
+
+    checkpoint_path = checkpoint_dir / "model_best.pth"
+    trainer.save_checkpoint(
+        checkpoint_path,
+        epoch=1,
+        extra={"best_val_acc": val_metrics["val_acc"]},
+    )
+    assert checkpoint_path.is_file()
+    return checkpoint_path
+
+
 class TestScriptsIntegration:
     """End-to-end integration tests for train.py and evaluate.py workflows."""
 
-    def test_train_and_evaluate_pipeline(
+    def test_train_pipeline(
         self,
         dummy_dataset_dir: Path,
         tmp_path: Path,
@@ -142,7 +224,14 @@ class TestScriptsIntegration:
         )
         assert checkpoint_path.is_file()
 
-        # Now evaluate using evaluate.py script logic
+    def test_evaluate_pipeline(
+        self,
+        dummy_dataset_dir: Path,
+        trained_checkpoint: Path,
+    ) -> None:
+        checkpoint_path = trained_checkpoint
+        device = torch.device("cpu")
+
         eval_args = argparse.Namespace(
             config=None,
             checkpoint=checkpoint_path,

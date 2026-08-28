@@ -6,13 +6,13 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
-import yaml
 from torch import nn
 from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 
-from moliv_rl.data import get_dataloaders
-from moliv_rl.data.transforms import (
+from moliv_rl.data import (
+    DataLoaderConfig,
+    get_dataloaders,
     get_train_transforms,
     get_val_transforms,
 )
@@ -22,32 +22,7 @@ from moliv_rl.models import MODEL_REGISTRY, get_model
 from moliv_rl.train.trainer import ClassificationTrainer
 from moliv_rl.utils.logger import get_logger
 from moliv_rl.utils.reproducibility import seed_worker, set_seeds
-
-# I am thinking about moving all that to Pytorch Lightning so it handles the training, but I am not sure yet, maybe later.
-
-
-def load_config(config_path: Path | str | None) -> dict[str, Any]:
-    r"""load_config(config_path) -> dict
-
-    Load structured configuration dictionary from a YAML configuration file.
-
-    Args:
-        config_path (Path or str or None): File path to YAML config. If ``None``, returns empty dict.
-
-    Returns:
-        dict: Parsed YAML configuration dictionary.
-    """
-    if config_path is None:
-        return {}
-
-    path = Path(config_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"Config file not found: {path}")
-
-    with path.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-
-    return data or {}
+from scripts.utils import load_config, resolve_device
 
 
 def _serialize_args(
@@ -70,49 +45,7 @@ def _serialize_args(
     }
 
 
-def resolve_device(device: str | None) -> torch.device:
-    r"""resolve_device(device) -> torch.device
-
-    Resolve target compute device string or detect the optimal available accelerator.
-
-    Args:
-        device (str or None): Explicit device string (``'cpu'``, ``'cuda'``, ``'mps'``, ``'auto'``) or ``None``.
-
-    Returns:
-        torch.device: Resolved PyTorch device object.
-    """
-    if device is not None and device != "auto":
-        resolved = torch.device(device)
-
-        if resolved.type == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError("CUDA was requested but is not available")
-
-        if resolved.type == "mps":
-            if not hasattr(torch.backends, "mps"):
-                raise RuntimeError("MPS is not available in this PyTorch build")
-
-            if not torch.backends.mps.is_available():
-                raise RuntimeError("MPS was requested but is not available")
-
-        return resolved
-
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps")
-
-    return torch.device("cpu")
-
-
-def parse_args() -> argparse.Namespace:
-    r"""parse_args() -> argparse.Namespace
-
-    Parse CLI options merged with default YAML configuration settings.
-
-    Returns:
-        argparse.Namespace: Populated argument namespace.
-    """
+def _create_config_parser() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument(
         "--config",
@@ -121,28 +54,21 @@ def parse_args() -> argparse.Namespace:
         help="Path to YAML configuration file.",
     )
     known_args, _ = config_parser.parse_known_args()
+    return config_parser, known_args
 
+
+def _load_config(known_args: argparse.Namespace) -> dict[str, Any]:
     cfg: dict[str, Any] = {}
     if known_args.config and known_args.config.is_file():
         cfg = load_config(known_args.config)
     elif known_args.config and known_args.config != Path("configs/default.yaml"):
         raise FileNotFoundError(f"Config file not found: {known_args.config}")
+    return cfg
 
-    project_cfg = cfg.get("project", {})
+
+def _add_data_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
     paths_cfg = cfg.get("paths", {})
     data_cfg = cfg.get("data", {})
-    model_cfg = cfg.get("model", {})
-    optimizer_cfg = cfg.get("optimizer", {})
-    scheduler_cfg = cfg.get("scheduler", {})
-    loss_cfg = cfg.get("loss", {})
-    training_cfg = cfg.get("training", {})
-    runtime_cfg = cfg.get("runtime", {})
-
-    parser = argparse.ArgumentParser(
-        description="Train a moliv_rl PyTorch classifier.",
-        parents=[config_parser],
-    )
-
     parser.add_argument(
         "--data-dir",
         type=Path,
@@ -168,10 +94,16 @@ def parse_args() -> argparse.Namespace:
         help="Subdirectory name for validation data.",
     )
     parser.add_argument(
-        "--epochs",
+        "--image-size",
         type=int,
-        default=training_cfg.get("epochs", 10),
-        help="Number of training epochs.",
+        default=data_cfg.get("image_size", 64),
+        help="Input image height and width.",
+    )
+    parser.add_argument(
+        "--resize-scale",
+        type=float,
+        default=data_cfg.get("resize_scale", 1.15),
+        help="Resize scale used before cropping.",
     )
     parser.add_argument(
         "--batch-size",
@@ -180,53 +112,27 @@ def parse_args() -> argparse.Namespace:
         help="Training and validation batch size.",
     )
     parser.add_argument(
-        "--lr",
-        type=float,
-        default=optimizer_cfg.get("learning_rate", 1e-3),
-        help="Initial learning rate.",
+        "--num-workers",
+        type=int,
+        default=data_cfg.get("num_workers", 2),
+        help="Number of DataLoader workers.",
     )
     parser.add_argument(
-        "--weight-decay",
-        type=float,
-        default=optimizer_cfg.get("weight_decay", 1e-4),
-        help="Optimizer weight decay.",
+        "--pin-memory",
+        action=argparse.BooleanOptionalAction,
+        default=data_cfg.get("pin_memory", None),
+        help="Pin memory in DataLoader.",
     )
     parser.add_argument(
-        "--optimizer",
-        choices=("adamw", "adam", "sgd"),
-        default=optimizer_cfg.get("name", "adamw"),
-        help="Optimizer algorithm.",
+        "--persistent-workers",
+        action=argparse.BooleanOptionalAction,
+        default=data_cfg.get("persistent_workers", None),
+        help="Use persistent workers in DataLoader.",
     )
-    parser.add_argument(
-        "--loss",
-        choices=("cross_entropy", "focal_loss", "focal"),
-        default=loss_cfg.get("name", "cross_entropy"),
-        help="Loss function criterion.",
-    )
-    parser.add_argument(
-        "--label-smoothing",
-        type=float,
-        default=loss_cfg.get("label_smoothing", 0.0),
-        help="Label smoothing factor.",
-    )
-    parser.add_argument(
-        "--scheduler",
-        choices=("cosine_annealing", "cosine", "none"),
-        default=scheduler_cfg.get("name", "cosine_annealing"),
-        help="Learning rate scheduler.",
-    )
-    parser.add_argument(
-        "--scheduler-interval",
-        choices=("epoch", "step"),
-        default=scheduler_cfg.get("interval", "epoch"),
-        help="How often to step the learning-rate scheduler.",
-    )
-    parser.add_argument(
-        "--eta-min",
-        type=float,
-        default=scheduler_cfg.get("eta_min", 0.0),
-        help="Minimum learning rate for cosine annealing.",
-    )
+
+
+def _add_model_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    model_cfg = cfg.get("model", {})
     parser.add_argument(
         "--model-name",
         type=str,
@@ -277,41 +183,78 @@ def parse_args() -> argparse.Namespace:
         default=model_cfg.get("optimize", False),
         help="Compile model using torch.compile.",
     )
+
+
+def _add_optimizer_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    optimizer_cfg = cfg.get("optimizer", {})
     parser.add_argument(
-        "--image-size",
-        type=int,
-        default=data_cfg.get("image_size", 64),
-        help="Input image height and width.",
+        "--optimizer",
+        choices=("adamw", "adam", "sgd"),
+        default=optimizer_cfg.get("name", "adamw"),
+        help="Optimizer algorithm.",
     )
     parser.add_argument(
-        "--resize-scale",
+        "--lr",
         type=float,
-        default=data_cfg.get("resize_scale", 1.15),
-        help="Resize scale used before cropping.",
+        default=optimizer_cfg.get("learning_rate", 1e-3),
+        help="Initial learning rate.",
     )
     parser.add_argument(
-        "--num-workers",
+        "--weight-decay",
+        type=float,
+        default=optimizer_cfg.get("weight_decay", 1e-4),
+        help="Optimizer weight decay.",
+    )
+
+
+def _add_loss_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    loss_cfg = cfg.get("loss", {})
+    parser.add_argument(
+        "--loss",
+        choices=("cross_entropy", "focal_loss", "focal"),
+        default=loss_cfg.get("name", "cross_entropy"),
+        help="Loss function criterion.",
+    )
+    parser.add_argument(
+        "--label-smoothing",
+        type=float,
+        default=loss_cfg.get("label_smoothing", 0.0),
+        help="Label smoothing factor.",
+    )
+
+
+def _add_scheduler_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    scheduler_cfg = cfg.get("scheduler", {})
+    parser.add_argument(
+        "--scheduler",
+        choices=("cosine_annealing", "cosine", "none"),
+        default=scheduler_cfg.get("name", "cosine_annealing"),
+        help="Learning rate scheduler.",
+    )
+    parser.add_argument(
+        "--scheduler-interval",
+        choices=("epoch", "step"),
+        default=scheduler_cfg.get("interval", "epoch"),
+        help="How often to step the learning-rate scheduler.",
+    )
+    parser.add_argument(
+        "--eta-min",
+        type=float,
+        default=scheduler_cfg.get("eta_min", 0.0),
+        help="Minimum learning rate for cosine annealing.",
+    )
+
+
+def _add_training_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    training_cfg = cfg.get("training", {})
+    runtime_cfg = cfg.get("runtime", {})
+    project_cfg = cfg.get("project", {})
+
+    parser.add_argument(
+        "--epochs",
         type=int,
-        default=data_cfg.get("num_workers", 2),
-        help="Number of DataLoader workers.",
-    )
-    parser.add_argument(
-        "--pin-memory",
-        action=argparse.BooleanOptionalAction,
-        default=data_cfg.get("pin_memory", None),
-        help="Pin memory in DataLoader.",
-    )
-    parser.add_argument(
-        "--persistent-workers",
-        action=argparse.BooleanOptionalAction,
-        default=data_cfg.get("persistent_workers", None),
-        help="Use persistent workers in DataLoader.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=project_cfg.get("seed", 42069),
-        help="Random seed.",
+        default=training_cfg.get("epochs", 10),
+        help="Number of training epochs.",
     )
     parser.add_argument(
         "--grad-accum-steps",
@@ -332,6 +275,12 @@ def parse_args() -> argparse.Namespace:
         help="Device, for example cpu, cuda, cuda:0, or mps.",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=project_cfg.get("seed", 42069),
+        help="Random seed.",
+    )
+    parser.add_argument(
         "--use-amp",
         action="store_true",
         default=training_cfg.get("use_amp", False),
@@ -349,6 +298,30 @@ def parse_args() -> argparse.Namespace:
         default=runtime_cfg.get("save_last", True),
         help="Save checkpoint after every epoch.",
     )
+
+
+def parse_args() -> argparse.Namespace:
+    r"""parse_args() -> argparse.Namespace
+
+    Parse CLI options merged with default YAML configuration settings.
+
+    Returns:
+        argparse.Namespace: Populated argument namespace.
+    """
+    config_parser, known_args = _create_config_parser()
+    cfg = _load_config(known_args)
+
+    parser = argparse.ArgumentParser(
+        description="Train a moliv_rl PyTorch classifier.",
+        parents=[config_parser],
+    )
+
+    _add_data_args(parser, cfg)
+    _add_model_args(parser, cfg)
+    _add_optimizer_args(parser, cfg)
+    _add_loss_args(parser, cfg)
+    _add_scheduler_args(parser, cfg)
+    _add_training_args(parser, cfg)
 
     return parser.parse_args()
 
@@ -419,15 +392,19 @@ def build_dataloaders(
         else (args.num_workers > 0)
     )
 
-    return get_dataloaders(
+    config = DataLoaderConfig(
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
         generator=generator,
         worker_init_fn=seed_worker,
+    )
+
+    return get_dataloaders(
+        config=config,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
     )
 
 

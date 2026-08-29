@@ -1,4 +1,4 @@
-# Default training and evaluation configuration for moliv_rl.
+# LeJEPA self-supervised training configuration for CPU.
 
 project:
   name: "moliv_rl"
@@ -17,15 +17,15 @@ data:
   train_split: "preview"
   validation_split: "preview"
   image_size: 256
-  batch_size: 32
-  num_workers: 2
-  pin_memory: true
-  persistent_workers: true
-  max_train_samples: null
-  max_val_samples: null
+  batch_size: 8
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  max_train_samples: 128
+  max_val_samples: 32
 
 model:
-  name: "classification_model"
+  name: "my_model"
   block_dims:
     - 32
     - 64
@@ -38,8 +38,8 @@ model:
   optimize: false
 
 optimizer:
-  name: "pagedadamw8bit"
-  learning_rate: 0.001
+  name: "adamw"
+  learning_rate: 0.0001
   weight_decay: 0.0001
   momentum: 0.9
 
@@ -53,16 +53,16 @@ loss:
   label_smoothing: 0.0
 
 training:
-  mode: "classification"
-  epochs: 10
-  gradient_accumulation_steps: 1
+  mode: "lejepa"
+  epochs: 5
+  gradient_accumulation_steps: 2
   use_amp: false
   precision_average: "macro"
   num_views: 2
   use_probe: true
 
 sigreg:
-  enabled: false
+  enabled: true
   weight: 0.01
   sketch_dim: 64
   num_integration_points: 17
@@ -70,10 +70,10 @@ sigreg:
   type: "strong"
 
 projector:
-  hidden_dim: 2048
+  hidden_dim: 512
   out_dim: 128
 
 runtime:
-  device: "auto"
+  device: "cpu"
   save_best: true
   save_last: true

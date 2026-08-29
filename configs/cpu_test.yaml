@@ -41,6 +41,7 @@ optimizer:
   name: "adamw"
   learning_rate: 0.001
   weight_decay: 0.0001
+  momentum: 0.9
 
 scheduler:
   name: "cosine_annealing"
@@ -52,10 +53,25 @@ loss:
   label_smoothing: 0.0
 
 training:
+  mode: "classification"
   epochs: 3
   gradient_accumulation_steps: 2
   use_amp: false
   precision_average: "macro"
+  num_views: 2
+  use_probe: true
+
+sigreg:
+  enabled: false
+  weight: 0.01
+  sketch_dim: 64
+  num_integration_points: 17
+  integration_t_max: 3.0
+  type: "strong"
+
+projector:
+  hidden_dim: 2048
+  out_dim: 128
 
 runtime:
   device: "cpu"

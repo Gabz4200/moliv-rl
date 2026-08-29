@@ -439,6 +439,25 @@ class MyModel(nn.Module):
         x = self.output_conv(x)
         return x
 
+    def get_embedding(self, x: torch.Tensor) -> torch.Tensor:
+        r"""Return a flat embedding vector for the input tensor.
+
+        Applies the backbone feature extractor and global average pooling
+        to produce a :math:`(N, D)` embedding suitable for contrastive and
+        regularization losses such as SIGReg.
+
+        Args:
+            x (torch.Tensor): Input image batch of shape :math:`(N, C, H, W)`.
+
+        Returns:
+            torch.Tensor: Flat embedding tensor of shape :math:`(N, D)`.
+        """
+        x = self.stem(x)
+        x = self.model(x)
+        x = self.output_conv(x)
+        x = torch.nn.functional.adaptive_avg_pool2d(x, (1, 1))
+        return x.flatten(1)
+
 
 class MyVideoModel(nn.Module):
     r"""MyVideoModel(block_dims, in_channels=3, out_channels=512, patch_size=8, dropout=0.2, conv_kernel_size=3)
@@ -714,6 +733,34 @@ class ClassificationModel(nn.Module):
         x = self.classifier(x)
         return x
 
+    def get_features(self, x: torch.Tensor) -> torch.Tensor:
+        r"""Return pre-classifier spatial feature maps.
+
+        Args:
+            x (torch.Tensor): Input image batch of shape :math:`(N, C, H, W)`.
+
+        Returns:
+            torch.Tensor: Spatial feature maps of shape :math:`(N, C_{out}, H', W')`.
+        """
+        return self.feature_extractor(x)
+
+    def get_embedding(self, x: torch.Tensor) -> torch.Tensor:
+        r"""Return a flat embedding vector for regularization losses.
+
+        Applies global average pooling over the spatial feature maps to
+        produce a :math:`(N, D)` tensor suitable for SIGReg and similar
+        isotropic-Gaussian regularizers.
+
+        Args:
+            x (torch.Tensor): Input image batch of shape :math:`(N, C, H, W)`.
+
+        Returns:
+            torch.Tensor: Flat embedding tensor of shape :math:`(N, D)`.
+        """
+        features = self.get_features(x)
+        pooled = torch.nn.functional.adaptive_avg_pool2d(features, (1, 1))
+        return pooled.flatten(1)
+
 
 MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "my_model": MyModel,
@@ -760,11 +807,11 @@ def get_model(
 __all__ = [
     "MODEL_REGISTRY",
     "ClassificationModel",
+    "GatedConv2D",
     "LiVConv2D",
     "MLPConv2D",
     "MyBlock",
     "MyModel",
     "MyVideoModel",
-    "GatedConv2D",
     "get_model",
 ]

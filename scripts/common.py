@@ -10,7 +10,6 @@ from torch.utils.data import DataLoader
 from moliv_rl.data import (
     DataLoaderConfig,
     get_dataloaders,
-    get_default_datasets,
     get_streaming_gameqa_datasets,
 )
 from moliv_rl.models import MODEL_REGISTRY

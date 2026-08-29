@@ -1,4 +1,4 @@
-# Default training and evaluation configuration for moliv_rl.
+# LeJEPA self-supervised training configuration for GPU.
 
 project:
   name: "moliv_rl"
@@ -12,7 +12,7 @@ paths:
   plots_dir: null
 
 data:
-  dataset_type: "local"
+  dataset_type: "streaming"
   dataset_id: "OpenMOSS-Team/GameQA-140K"
   train_split: "preview"
   validation_split: "preview"
@@ -21,15 +21,16 @@ data:
   num_workers: 2
   pin_memory: true
   persistent_workers: true
-  max_train_samples: null
-  max_val_samples: null
+  max_train_samples: 20000
+  max_val_samples: 4000
 
 model:
-  name: "classification_model"
+  name: "my_model"
   block_dims:
     - 32
     - 64
     - 128
+    - 256
   in_channels: 3
   out_channels: 512
   patch_size: 8
@@ -39,7 +40,7 @@ model:
 
 optimizer:
   name: "pagedadamw8bit"
-  learning_rate: 0.001
+  learning_rate: 0.0001
   weight_decay: 0.0001
   momentum: 0.9
 
@@ -53,16 +54,16 @@ loss:
   label_smoothing: 0.0
 
 training:
-  mode: "classification"
+  mode: "lejepa"
   epochs: 10
   gradient_accumulation_steps: 1
-  use_amp: false
+  use_amp: true
   precision_average: "macro"
   num_views: 2
   use_probe: true
 
 sigreg:
-  enabled: false
+  enabled: true
   weight: 0.01
   sketch_dim: 64
   num_integration_points: 17
@@ -74,6 +75,6 @@ projector:
   out_dim: 128
 
 runtime:
-  device: "auto"
+  device: "cuda"
   save_best: true
   save_last: true

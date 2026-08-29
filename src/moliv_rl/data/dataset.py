@@ -30,6 +30,7 @@ class DataLoaderConfig:
     worker_init_fn: Any = None
     data_dir: Path | str = "data"
     image_size: int = 64
+    collate_fn: Any = None
 
 
 def get_default_datasets(
@@ -107,6 +108,7 @@ def get_dataloaders(
         persistent_workers=use_persistent,
         generator=config.generator,
         worker_init_fn=config.worker_init_fn,
+        collate_fn=config.collate_fn,
     )
 
     val_loader = DataLoader(
@@ -117,17 +119,88 @@ def get_dataloaders(
         pin_memory=config.pin_memory,
         persistent_workers=use_persistent,
         worker_init_fn=config.worker_init_fn,
+        collate_fn=config.collate_fn,
     )
 
     return train_loader, val_loader
 
 
+def lejepa_collate(
+    batch: list[tuple[torch.Tensor, torch.Tensor]],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""Collate function for LeJEPA multi-view batches.
+
+    Stacks a list of ``(views, target)`` pairs into a batch where views
+    have shape :math:`(V, N, C, H, W)`.
+
+    Args:
+        batch (list): List of ``(views, target)`` tuples where ``views``
+            has shape :math:`(V, C, H, W)`.
+
+    Returns:
+        tuple: ``(views, targets)`` with ``views`` of shape
+            :math:`(V, N, C, H, W)` and ``targets`` of shape :math:`(N,)`.
+    """
+    views_list, targets_list = zip(*batch)
+    views = torch.stack(views_list, dim=1)
+    targets = torch.tensor(targets_list, dtype=torch.long)
+    return views, targets
+
+
+class MultiViewDataset(Dataset):
+    r"""MultiViewDataset(dataset, transform=None, num_views=2)
+
+    Wraps a map-style dataset to produce ``num_views`` augmented views
+    per sample.
+
+    Args:
+        dataset (Dataset): Base dataset yielding ``(image, label)`` pairs.
+        transform (callable, optional): Multi-view transform applied to each
+            image. If ``None``, uses the dataset's existing transform.
+        num_views (int, optional): Number of views per sample. Default: ``2``
+
+    Shape:
+        - Input: ``(image, label)`` from base dataset
+        - Output: ``(views, label)`` where ``views`` has shape
+          :math:`(V, C, H, W)`
+    """
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        transform=None,
+        num_views: int = 2,
+    ) -> None:
+        self.dataset = dataset
+        self.transform = transform if transform is not None else getattr(
+            dataset, "transform", None
+        )
+        self.num_views = int(num_views)
+
+    def __len__(self) -> int:
+        return len(self.dataset)  # type: ignore[arg-type]
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
+        img, label = self.dataset[index]
+        if self.transform is not None:
+            views = self.transform(img)
+        else:
+            if isinstance(img, torch.Tensor):
+                views = img.unsqueeze(0).repeat(self.num_views, 1, 1, 1)
+            else:
+                C, H, W = (img.shape[2], img.shape[0], img.shape[1]) if len(img.shape) == 3 else (3, img.height, img.width)
+                views = torch.zeros(self.num_views, C, H, W)
+        return views, int(label)
+
+
 __all__ = [
+    "MultiViewDataset",
     "StreamingGameQADataset",
     "StreamingGameQADatasetConfig",
     "get_dataloaders",
     "get_default_datasets",
     "get_streaming_gameqa_datasets",
+    "lejepa_collate",
 ]
 
 

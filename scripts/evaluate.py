@@ -12,7 +12,7 @@ from torchvision.datasets import ImageFolder
 
 from moliv_rl.data.transforms import get_val_transforms
 from moliv_rl.metrics import PrecisionAverage
-from moliv_rl.models import MODEL_REGISTRY, get_model
+from moliv_rl.models import MODEL_REGISTRY, get_model  # noqa: F401
 from moliv_rl.train.trainer import ClassificationTrainer
 from moliv_rl.utils.logger import get_logger
 from scripts.common import (

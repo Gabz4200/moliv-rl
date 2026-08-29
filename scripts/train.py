@@ -14,24 +14,28 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 from torchvision.datasets import ImageFolder
 
-from moliv_rl.models import MODEL_REGISTRY, get_model
-from moliv_rl.train.trainer import ClassificationTrainer
+from moliv_rl.data.dataset import MultiViewDataset, lejepa_collate
+from moliv_rl.data.transforms import MultiViewTransform, get_train_transforms
+from moliv_rl.losses import LeJepaLoss, SIGReg, WeakSIGReg
+from moliv_rl.losses.focal_loss import FocalLoss
+from moliv_rl.metrics import PrecisionAverage
+from moliv_rl.models import MODEL_REGISTRY, get_model  # noqa: F401
+from moliv_rl.train.factory import build_optimizer, build_scheduler
+from moliv_rl.train.trainer import ClassificationTrainer, LeJepaTrainer
 from moliv_rl.utils.logger import get_logger
 from moliv_rl.utils.reproducibility import set_seeds
 from scripts.common import (
     add_data_args,
     add_model_args,
-    build_datasets,
     build_dataloaders,
-    build_local_datasets,
-    build_streaming_datasets,
+    build_datasets,
     create_config_parser,
     load_yaml_config,
 )
-from scripts.utils import load_config, resolve_device
+from scripts.utils import load_config, resolve_device  # noqa: F401
 
 
 def _serialize_args(
@@ -91,11 +95,131 @@ def _build_result_paths(
     return ResultPaths(metrics_file=metrics_path, plots_dir=plots_path)
 
 
+def _add_training_mode_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    training_cfg = cfg.get("training", {})
+    parser.add_argument(
+        "--training-mode",
+        choices=("classification", "lejepa"),
+        default=training_cfg.get("mode", "classification"),
+        help="Training paradigm: standard classification or LeJEPA self-supervised learning.",
+    )
+    parser.add_argument(
+        "--num-views",
+        type=int,
+        default=training_cfg.get("num_views", 2),
+        help="Number of augmented views per sample for LeJEPA training.",
+    )
+
+
+def _add_sigreg_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    sigreg_cfg = cfg.get("sigreg", {})
+    parser.add_argument(
+        "--sigreg-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=sigreg_cfg.get("enabled", False),
+        help="Enable SIGReg regularization on classification features.",
+    )
+    parser.add_argument(
+        "--sigreg-weight",
+        type=float,
+        default=sigreg_cfg.get("weight", 0.01),
+        help="Weight for the SIGReg term in the classification loss.",
+    )
+    parser.add_argument(
+        "--sigreg-sketch-dim",
+        type=int,
+        default=sigreg_cfg.get("sketch_dim", 64),
+        help="Sketch dimension for SIGReg random projections.",
+    )
+    parser.add_argument(
+        "--sigreg-integration-points",
+        type=int,
+        default=sigreg_cfg.get("num_integration_points", 17),
+        help="Number of quadrature points for SIGReg integration.",
+    )
+    parser.add_argument(
+        "--sigreg-integration-t-max",
+        type=float,
+        default=sigreg_cfg.get("integration_t_max", 3.0),
+        help="Upper bound for SIGReg integration domain.",
+    )
+    parser.add_argument(
+        "--sigreg-lamb",
+        type=float,
+        default=sigreg_cfg.get("lamb", 0.02),
+        help="SIGReg trade-off weight for LeJEPA loss.",
+    )
+    parser.add_argument(
+        "--sigreg-type",
+        choices=("strong", "weak"),
+        default=sigreg_cfg.get("type", "strong"),
+        help="SIGReg variant: strong (SIGReg) or weak (WeakSIGReg).",
+    )
+
+
+def _add_projector_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    projector_cfg = cfg.get("projector", {})
+    training_cfg = cfg.get("training", {})
+    parser.add_argument(
+        "--projector-hidden-dim",
+        type=int,
+        default=projector_cfg.get("hidden_dim", 2048),
+        help="Hidden dimension of the LeJEPA projection MLP.",
+    )
+    parser.add_argument(
+        "--projector-out-dim",
+        type=int,
+        default=projector_cfg.get("out_dim", 128),
+        help="Output dimension of the LeJEPA projection head.",
+    )
+    parser.add_argument(
+        "--use-probe",
+        action=argparse.BooleanOptionalAction,
+        default=training_cfg.get("use_probe", True),
+        help="Use an online linear probe during LeJEPA training.",
+    )
+
+
 def _add_optimizer_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
     optimizer_cfg = cfg.get("optimizer", {})
     parser.add_argument(
         "--optimizer",
-        choices=("adamw", "adam", "sgd"),
+        choices=(
+            "adam",
+            "adamw",
+            "sgd",
+            "adagrad",
+            "lamb",
+            "lars",
+            "lion",
+            "rmsprop",
+            "adam8bit",
+            "adam32bit",
+            "pagedadam",
+            "pagedadam8bit",
+            "pagedadam32bit",
+            "adamw8bit",
+            "adamw32bit",
+            "pagedadamw",
+            "pagedadamw8bit",
+            "pagedadamw32bit",
+            "adagrad8bit",
+            "adagrad32bit",
+            "lamb8bit",
+            "lamb32bit",
+            "lars8bit",
+            "lars32bit",
+            "pytorchlars",
+            "lion8bit",
+            "lion32bit",
+            "pagedlion",
+            "pagedlion8bit",
+            "pagedlion32bit",
+            "rmsprop8bit",
+            "rmsprop32bit",
+            "sgd8bit",
+            "sgd32bit",
+        ),
         default=optimizer_cfg.get("name", "adamw"),
         help="Optimizer algorithm.",
     )
@@ -110,6 +234,12 @@ def _add_optimizer_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) ->
         type=float,
         default=optimizer_cfg.get("weight_decay", 1e-4),
         help="Optimizer weight decay.",
+    )
+    parser.add_argument(
+        "--momentum",
+        type=float,
+        default=optimizer_cfg.get("momentum", 0.9),
+        help="Momentum factor for SGD/LARS/LION-style optimizers.",
     )
 
 
@@ -238,7 +368,7 @@ def parse_args() -> argparse.Namespace:
     cfg = load_yaml_config(known_args)
 
     parser = argparse.ArgumentParser(
-        description="Train a moliv_rl PyTorch classifier.",
+        description="Train a moliv_rl PyTorch model.",
         parents=[config_parser],
     )
 
@@ -248,6 +378,9 @@ def parse_args() -> argparse.Namespace:
     _add_loss_args(parser, cfg)
     _add_scheduler_args(parser, cfg)
     _add_training_args(parser, cfg)
+    _add_training_mode_args(parser, cfg)
+    _add_sigreg_args(parser, cfg)
+    _add_projector_args(parser, cfg)
 
     return parser.parse_args()
 
@@ -256,15 +389,47 @@ def parse_args() -> argparse.Namespace:
 
 
 
+def _build_sigreg_loss(args: argparse.Namespace) -> nn.Module | None:
+    r"""Build a SIGReg loss module from CLI args, if enabled."""
+    if not getattr(args, "sigreg_enabled", False):
+        return None
+
+    sigreg_type = getattr(args, "sigreg_type", "strong")
+    if sigreg_type == "weak":
+        return WeakSIGReg(
+            sketch_dim=getattr(args, "sigreg_sketch_dim", 64),
+        )
+    return SIGReg(
+        sketch_dim=getattr(args, "sigreg_sketch_dim", 64),
+        num_integration_points=getattr(args, "sigreg_integration_points", 17),
+        integration_t_max=getattr(args, "sigreg_integration_t_max", 3.0),
+    )
+
+
+def _build_lejepa_projector(
+    in_dim: int,
+    hidden_dim: int,
+    out_dim: int,
+) -> nn.Module:
+    r"""Build a simple 2-layer MLP projector for LeJEPA."""
+    return nn.Sequential(
+        nn.Linear(in_dim, hidden_dim),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, out_dim),
+    )
+
+
 def build_trainer(
     args: argparse.Namespace,
     device: torch.device,
     logger: logging.Logger,
     steps_per_epoch: int,
-) -> ClassificationTrainer:
-    r"""build_trainer(args, device, logger, steps_per_epoch) -> ClassificationTrainer
+) -> Any:
+    r"""build_trainer(args, device, logger, steps_per_epoch) -> Trainer
 
-    Instantiate model architecture, loss criterion, optimizer, scheduler, and trainer.
+    Instantiate model architecture, loss criterion, optimizer, scheduler, and
+    trainer. Dispatches between standard classification and LeJEPA
+    self-supervised training based on ``args.training_mode``.
 
     Args:
         args (argparse.Namespace): Experiment hyperparameter configuration.
@@ -274,8 +439,10 @@ def build_trainer(
             step-wise schedulers.
 
     Returns:
-        ClassificationTrainer: Initialized trainer instance.
+        ClassificationTrainer | LeJepaTrainer: Initialized trainer instance.
     """
+    training_mode = getattr(args, "training_mode", "classification")
+
     model_kwargs: dict[str, Any] = {
         "block_dims": args.block_dims,
         "in_channels": args.in_channels,
@@ -286,6 +453,83 @@ def build_trainer(
     if args.model_name == "classification_model":
         model_kwargs["num_classes"] = args.num_classes
 
+    if training_mode == "lejepa":
+        if args.model_name == "classification_model":
+            raise ValueError(
+                "LeJEPA training requires a backbone model without the classification head. "
+                "Use --model-name my_model."
+            )
+
+        model = get_model(
+            model_name=args.model_name,
+            optimize=args.optimize_model,
+            **model_kwargs,
+        )
+
+        projector = _build_lejepa_projector(
+            in_dim=args.out_channels,
+            hidden_dim=getattr(args, "projector_hidden_dim", 2048),
+            out_dim=getattr(args, "projector_out_dim", 128),
+        )
+
+        sigreg_fn = SIGReg(
+            sketch_dim=getattr(args, "sigreg_sketch_dim", 64),
+            num_integration_points=getattr(args, "sigreg_integration_points", 17),
+            integration_t_max=getattr(args, "sigreg_integration_t_max", 3.0),
+        )
+        lejepa_criterion = LeJepaLoss(
+            sigreg_loss_fn=sigreg_fn,
+            lamb=getattr(args, "sigreg_lamb", 0.02),
+            normalize_projections=True,
+        )
+
+        probe_criterion = None
+        if getattr(args, "use_probe", True):
+            probe_criterion = nn.Linear(
+                getattr(args, "projector_out_dim", 128),
+                getattr(args, "num_classes", 30),
+            )
+
+        parameters = list(model.parameters()) + list(projector.parameters())
+        if probe_criterion is not None:
+            parameters += list(probe_criterion.parameters())
+
+        optimizer = build_optimizer(
+            parameters,
+            name=args.optimizer,
+            learning_rate=args.lr,
+            weight_decay=args.weight_decay,
+            momentum=getattr(args, "momentum", 0.9),
+        )
+
+        scheduler = None
+        if args.scheduler in ("cosine_annealing", "cosine"):
+            optimizer_steps_per_epoch = (
+                steps_per_epoch + args.grad_accum_steps - 1
+            ) // args.grad_accum_steps
+            scheduler = build_scheduler(
+                optimizer,
+                name=args.scheduler,
+                scheduler_interval=args.scheduler_interval,
+                epochs=args.epochs,
+                steps_per_epoch=optimizer_steps_per_epoch,
+                eta_min=args.eta_min,
+            )
+
+        return LeJepaTrainer(
+            model=model,
+            projector=projector,
+            optimizer=optimizer,
+            lejepa_criterion=lejepa_criterion,
+            probe_criterion=probe_criterion,
+            device=device,
+            scheduler=scheduler,
+            scheduler_interval=args.scheduler_interval,
+            logger=logger,
+            use_amp=args.use_amp,
+        )
+
+    # Classification mode
     model = get_model(
         model_name=args.model_name,
         optimize=args.optimize_model,
@@ -303,49 +547,29 @@ def build_trainer(
     else:
         raise ValueError(f"Unsupported loss function: {args.loss}")
 
-    if args.optimizer == "adamw":
-        optimizer: torch.optim.Optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-        )
-    elif args.optimizer == "adam":
-        optimizer = torch.optim.Adam(
-            model.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-        )
-    elif args.optimizer == "sgd":
-        optimizer = torch.optim.SGD(
-            model.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-            momentum=0.9,
-        )
-    else:
-        raise ValueError(f"Unsupported optimizer: {args.optimizer}")
+    sigreg_loss_fn = _build_sigreg_loss(args)
 
+    optimizer = build_optimizer(
+        model.parameters(),
+        name=args.optimizer,
+        learning_rate=args.lr,
+        weight_decay=args.weight_decay,
+        momentum=getattr(args, "momentum", 0.9),
+    )
+
+    scheduler = None
     if args.scheduler in ("cosine_annealing", "cosine"):
         optimizer_steps_per_epoch = (
             steps_per_epoch + args.grad_accum_steps - 1
         ) // args.grad_accum_steps
-        scheduler_t_max = (
-            args.epochs
-            if args.scheduler_interval == "epoch"
-            else args.epochs * optimizer_steps_per_epoch
+        scheduler = build_scheduler(
+            optimizer,
+            name=args.scheduler,
+            scheduler_interval=args.scheduler_interval,
+            epochs=args.epochs,
+            steps_per_epoch=optimizer_steps_per_epoch,
+            eta_min=args.eta_min,
         )
-
-        scheduler: torch.optim.lr_scheduler.LRScheduler | None = (
-            torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer,
-                T_max=scheduler_t_max,
-                eta_min=args.eta_min,
-            )
-        )
-    elif args.scheduler in ("none", None):
-        scheduler = None
-    else:
-        raise ValueError(f"Unsupported scheduler: {args.scheduler}")
 
     return ClassificationTrainer(
         model=model,
@@ -356,6 +580,8 @@ def build_trainer(
         scheduler_interval=args.scheduler_interval,
         logger=logger,
         use_amp=args.use_amp,
+        sigreg_loss_fn=sigreg_loss_fn,
+        sigreg_weight=getattr(args, "sigreg_weight", 0.0),
     )
 
 
@@ -483,37 +709,84 @@ def main() -> None:
 
     train_dataset, val_dataset = build_datasets(args)
 
-    if isinstance(train_dataset, ImageFolder):
-        logger.info(
-            "Classes: %s",
-            train_dataset.classes,
+    training_mode = getattr(args, "training_mode", "classification")
+
+    if training_mode == "lejepa":
+        mv_transform = MultiViewTransform(
+            transform=get_train_transforms(image_size=args.image_size),
+            num_views=getattr(args, "num_views", 2),
         )
-        logger.info(
-            "Training samples: %d",
-            len(train_dataset),
+        train_dataset = MultiViewDataset(
+            dataset=train_dataset,
+            transform=mv_transform,
+            num_views=getattr(args, "num_views", 2),
         )
         if val_dataset is not None:
-            logger.info(
-                "Validation samples: %d",
-                len(val_dataset),
-            )
-    else:
-        logger.info(
-            "Dataset: %s",
-            args.dataset_id,
-        )
-        if hasattr(train_dataset, "label2id") and train_dataset.label2id:
-            logger.info(
-                "Classes: %s",
-                len(train_dataset.label2id),
+            val_dataset = MultiViewDataset(
+                dataset=val_dataset,
+                transform=mv_transform,
+                num_views=getattr(args, "num_views", 2),
             )
 
-    train_loader, val_loader = build_dataloaders(
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        args=args,
-        device=device,
-    )
+        generator = torch.Generator()
+        generator.manual_seed(args.seed)
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=not isinstance(train_dataset, IterableDataset),
+            num_workers=args.num_workers,
+            pin_memory=args.pin_memory if args.pin_memory is not None else (device.type == "cuda"),
+            persistent_workers=args.persistent_workers if args.persistent_workers is not None else (args.num_workers > 0),
+            generator=generator,
+            collate_fn=lejepa_collate,
+        )
+        val_loader = (
+            DataLoader(
+                val_dataset,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.num_workers,
+                pin_memory=args.pin_memory if args.pin_memory is not None else (device.type == "cuda"),
+                persistent_workers=args.persistent_workers if args.persistent_workers is not None else (args.num_workers > 0),
+                generator=generator,
+                collate_fn=lejepa_collate,
+            )
+            if val_dataset is not None
+            else None
+        )
+    else:
+        if isinstance(train_dataset, ImageFolder):
+            logger.info(
+                "Classes: %s",
+                train_dataset.classes,
+            )
+            logger.info(
+                "Training samples: %d",
+                len(train_dataset),
+            )
+            if val_dataset is not None:
+                logger.info(
+                    "Validation samples: %d",
+                    len(val_dataset),
+                )
+        else:
+            logger.info(
+                "Dataset: %s",
+                args.dataset_id,
+            )
+            if hasattr(train_dataset, "label2id") and train_dataset.label2id:
+                logger.info(
+                    "Classes: %s",
+                    len(train_dataset.label2id),
+                )
+
+        train_loader, val_loader = build_dataloaders(
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            args=args,
+            device=device,
+        )
 
     trainer = build_trainer(
         args=args,
@@ -527,21 +800,38 @@ def main() -> None:
     history: list[dict[str, Any]] = []
 
     for epoch in range(1, args.epochs + 1):
-        train_loss = trainer.train_epoch(
+        train_metrics = trainer.train_epoch(
             dataloader=train_loader,
             epoch=epoch,
             grad_accum_steps=args.grad_accum_steps,
         )
 
-        val_metrics = trainer.evaluate(
-            dataloader=val_loader,
-            precision_average=cast(
-                PrecisionAverage,
-                args.precision_average,
+        if training_mode == "lejepa":
+            train_loss = float(train_metrics.get("train_loss", 0.0))
+            val_metrics = (
+                trainer.evaluate_probe(
+                    dataloader=val_loader,
+                    precision_average=cast(
+                        PrecisionAverage,
+                        args.precision_average,
+                    )
+                    if val_loader is not None
+                    else "macro",
+                )
+                if val_loader is not None
+                else {"val_loss": 0.0, "val_acc": 0.0, "val_precision": 0.0}
             )
-            if val_loader is not None
-            else "macro",
-        )
+        else:
+            train_loss = float(train_metrics) if isinstance(train_metrics, (int, float)) else train_metrics.get("train_loss", 0.0)
+            val_metrics = trainer.evaluate(
+                dataloader=val_loader,
+                precision_average=cast(
+                    PrecisionAverage,
+                    args.precision_average,
+                )
+                if val_loader is not None
+                else "macro",
+            )
 
         learning_rate = (
             trainer.scheduler.get_last_lr()[0]
@@ -549,26 +839,39 @@ def main() -> None:
             else float(trainer.optimizer.param_groups[0]["lr"])
         )
 
-        history.append(
-            {
-                "epoch": epoch,
-                "train_loss": train_loss,
-                "val_loss": val_metrics["val_loss"],
-                "val_acc": val_metrics["val_acc"],
-                "val_precision": val_metrics["val_precision"],
-                "lr": learning_rate,
-            }
-        )
+        history_entry: dict[str, Any] = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_metrics.get("val_loss", 0.0),
+            "val_acc": val_metrics.get("val_acc", 0.0),
+            "val_precision": val_metrics.get("val_precision", 0.0),
+            "lr": learning_rate,
+        }
 
-        logger.info(
-            "Epoch %03d | train_loss=%.6f | val_loss=%.6f | "
-            "val_acc=%.4f | val_precision=%.4f",
-            epoch,
-            train_loss,
-            val_metrics["val_loss"],
-            val_metrics["val_acc"],
-            val_metrics["val_precision"],
+        if training_mode == "lejepa":
+            history_entry.update(
+                {
+                    "invariance_loss": train_metrics.get("invariance_loss", 0.0),
+                    "sigreg_loss": train_metrics.get("sigreg_loss", 0.0),
+                    "probe_loss": train_metrics.get("probe_loss", 0.0),
+                }
+            )
+
+        history.append(history_entry)
+
+        log_msg = (
+            f"Epoch {epoch:03d} | train_loss={train_loss:.6f} | "
+            f"val_loss={val_metrics.get('val_loss', 0.0):.6f} | "
+            f"val_acc={val_metrics.get('val_acc', 0.0):.4f} | "
+            f"val_precision={val_metrics.get('val_precision', 0.0):.4f}"
         )
+        if training_mode == "lejepa":
+            log_msg += (
+                f" | inv={train_metrics.get('invariance_loss', 0.0):.6f} | "
+                f"sigreg={train_metrics.get('sigreg_loss', 0.0):.6f} | "
+                f"probe={train_metrics.get('probe_loss', 0.0):.6f}"
+            )
+        logger.info(log_msg)
 
         checkpoint_metadata: dict[str, Any] = {
             "args": _serialize_args(vars(args)),
@@ -589,8 +892,8 @@ def main() -> None:
                 extra=checkpoint_metadata,
             )
 
-        if val_metrics["val_acc"] >= best_val_acc:
-            best_val_acc = val_metrics["val_acc"]
+        if val_metrics.get("val_acc", 0.0) >= best_val_acc:
+            best_val_acc = val_metrics.get("val_acc", 0.0)
             best_epoch = epoch
 
             if args.save_best:

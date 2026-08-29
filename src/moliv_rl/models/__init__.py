@@ -24,6 +24,7 @@ from .my_model import (
 __all__ = [
     "MODEL_REGISTRY",
     "ClassificationModel",
+    "GatedConv2D",
     "HardSigmoid",
     "HardSwish",
     "InvertedResidual",
@@ -34,7 +35,6 @@ __all__ = [
     "MyModel",
     "MyVideoModel",
     "SEModule",
-    "GatedConv2D",
     "get_model",
     "mobilenetv3_large",
     "mobilenetv3_small",

@@ -43,7 +43,7 @@ def _build_pad_to_multiple(divisor: int = 8, fill: float = 0):
             self.divisor = divisor
             self.fill = fill
 
-        def __call__(self, img: torch.Tensor) -> torch.Tensor:
+        def __call__(self, img: Any) -> Any:
             if isinstance(img, torch.Tensor):
                 _, h, w = img.shape
             else:
@@ -76,7 +76,7 @@ class ResizePreserveAspectRatio:
         self.height = height
         self.antialias = antialias
 
-    def __call__(self, img: torch.Tensor) -> torch.Tensor:
+    def __call__(self, img: Any) -> Any:
         if isinstance(img, torch.Tensor):
             _, h, w = img.shape
         else:
@@ -253,9 +253,42 @@ def get_val_transforms(
     )
 
 
+class MultiViewTransform:
+    r"""MultiViewTransform(transform, num_views=2)
+
+    Apply a base transform independently multiple times to produce a stack
+    of augmented views from a single image.
+
+    Args:
+        transform (callable): Base augmentation pipeline applied to each view.
+        num_views (int, optional): Number of independent augmented views to
+            generate per sample. Default: ``2``
+
+    Shape:
+        - Input: PIL Image or tensor
+        - Output: :math:`(V, C, H, W)` tensor of augmented views.
+
+    Examples::
+
+        >>> base = get_train_transforms(image_size=256)
+        >>> mv = MultiViewTransform(base, num_views=2)
+        >>> views = mv(img)
+        >>> views.shape
+        torch.Size([2, 3, 256, 256])
+    """
+
+    def __init__(self, transform, num_views: int = 2) -> None:
+        self.transform = transform
+        self.num_views = int(num_views)
+
+    def __call__(self, img):
+        return torch.stack([self.transform(img) for _ in range(self.num_views)], dim=0)
+
+
 __all__ = [
     "IMAGENET_MEAN",
     "IMAGENET_STD",
+    "MultiViewTransform",
     "get_train_transforms",
     "get_val_transforms",
 ]

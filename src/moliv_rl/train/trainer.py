@@ -51,6 +51,7 @@ class ClassificationTrainer:
         scheduler_interval: Literal["epoch", "step"] = "epoch",
         logger: logging.Logger | None = None,
         use_amp: bool = False,
+        amp_dtype: torch.dtype | None = None,
     ) -> None:
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -65,7 +66,7 @@ class ClassificationTrainer:
         self.logger = logger or logging.getLogger(__name__)
 
         self.use_amp = use_amp and self.device.type == "cuda"
-        self.amp_dtype = torch.float16
+        self.amp_dtype = amp_dtype or torch.float16
         self.scaler = torch.amp.GradScaler(
             "cuda",
             enabled=self.use_amp,
@@ -125,7 +126,11 @@ class ClassificationTrainer:
                 "ClassificationTrainer.train_epoch requires an optimizer, but self.optimizer is None."
             )
 
-        num_loader_batches = len(dataloader)
+        try:
+            num_loader_batches = len(dataloader)
+        except TypeError:
+            num_loader_batches = None
+
         if num_loader_batches == 0:
             return 0.0
 
@@ -245,6 +250,8 @@ class ClassificationTrainer:
             targets,
             average=precision_average,
         )
+        # calculate_precision returns float for string average values;
+        # runtime cast keeps the annotation accurate.
         val_precision_val = (
             float(val_precision)
             if isinstance(val_precision, (int, float))

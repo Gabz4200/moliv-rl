@@ -188,8 +188,8 @@ class MLPConv2D(nn.Module):
         return x + identity if self.use_residual else x
 
 
-class SwiGluConv2D(nn.Module):
-    r"""SwiGluConv2D(in_channels, hidden_channels, out_channels, kernel_size=3, hidden_dropout=0.1, use_norm=True, use_residual=True)
+class GatedConv2D(nn.Module):
+    r"""GatedConv2D(in_channels, hidden_channels, out_channels, kernel_size=3, hidden_dropout=0.1, use_norm=True, use_residual=True)
 
     SwiGLU-style lightweight 2D convolution block with dual-branch depthwise gating.
 
@@ -209,7 +209,7 @@ class SwiGluConv2D(nn.Module):
 
     Examples::
 
-        >>> block = SwiGluConv2D(in_channels=32, hidden_channels=128, out_channels=32)
+        >>> block = GatedConv2D(in_channels=32, hidden_channels=128, out_channels=32)
         >>> x = torch.randn(2, 32, 16, 16)
         >>> out = block(x)
         >>> out.shape
@@ -284,7 +284,7 @@ class SwiGluConv2D(nn.Module):
 class MyBlock(nn.Module):
     r"""MyBlock(in_channels, hidden_channels, out_channels, kernel_size=3, hidden_dropout=0.1, include_swiglu=True, use_norm=True, use_residual=True)
 
-    Sequential composite block combining LiVConv2D, MLPConv2D, and optional SwiGluConv2D.
+    Sequential composite block combining LiVConv2D, MLPConv2D, and optional GatedConv2D.
 
     Args:
         in_channels (int): Number of input channels.
@@ -292,7 +292,7 @@ class MyBlock(nn.Module):
         out_channels (int): Number of output channels.
         kernel_size (int, optional): Spatial kernel size. Default: ``3``
         hidden_dropout (float, optional): Dropout probability. Default: ``0.1``
-        include_swiglu (bool, optional): If ``True``, appends SwiGluConv2D to the block. Default: ``True``
+        include_swiglu (bool, optional): If ``True``, appends GatedConv2D to the block. Default: ``True``
         use_norm (bool, optional): Whether to apply batch normalization. Default: ``True``
         use_residual (bool, optional): Whether to enable residual skip connections. Default: ``True``
 
@@ -332,7 +332,7 @@ class MyBlock(nn.Module):
             use_residual=use_residual,
         )
         self.swiglu_conv = (
-            SwiGluConv2D(
+            GatedConv2D(
                 in_channels=out_channels,
                 hidden_channels=hidden_channels,
                 out_channels=out_channels,
@@ -612,13 +612,26 @@ class MyVideoModel(nn.Module):
         x_t = x_t.permute(0, 2, 3, 1).contiguous()  # (B, Hf, Wf, 2*C_feat)
         x_t = x_t.view(B * Hf * Wf, 2 * C_feat, 1)
 
-        buffer = (
+        expected_buffer_shape = (B * Hf * Wf, 2 * C_feat, k - 1)
+        cached_buffer = (
             cache["conv_buffer"]
             if cache is not None and "conv_buffer" in cache
+            else None
+        )
+
+        if cached_buffer is not None and cached_buffer.shape != expected_buffer_shape:
+            raise RuntimeError(
+                "Streaming cache shape mismatch: expected "
+                f"{expected_buffer_shape}, got {tuple(cached_buffer.shape)}. "
+                "All frames in a streaming sequence must have identical "
+                "batch size, channels, and spatial dimensions."
+            )
+
+        buffer = (
+            cached_buffer
+            if cached_buffer is not None
             else torch.zeros(
-                B * Hf * Wf,
-                2 * C_feat,
-                k - 1,
+                expected_buffer_shape,
                 device=x_t.device,
                 dtype=x_t.dtype,
             )
@@ -752,6 +765,6 @@ __all__ = [
     "MyBlock",
     "MyModel",
     "MyVideoModel",
-    "SwiGluConv2D",
+    "GatedConv2D",
     "get_model",
 ]

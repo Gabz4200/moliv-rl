@@ -10,12 +10,18 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 
-from moliv_rl.data import get_val_transforms
+from moliv_rl.data.transforms import get_val_transforms
 from moliv_rl.metrics import PrecisionAverage
 from moliv_rl.models import MODEL_REGISTRY, get_model
 from moliv_rl.train.trainer import ClassificationTrainer
 from moliv_rl.utils.logger import get_logger
-from scripts.utils import load_config, resolve_device
+from scripts.common import (
+    add_data_args,
+    add_model_args,
+    create_config_parser,
+    load_yaml_config,
+)
+from scripts.utils import resolve_device
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,26 +32,9 @@ def parse_args() -> argparse.Namespace:
     Returns:
         argparse.Namespace: Populated argument namespace.
     """
-    config_parser = argparse.ArgumentParser(add_help=False)
-    config_parser.add_argument(
-        "--config",
-        type=Path,
-        default=Path("configs/default.yaml"),
-        help="Path to YAML configuration file.",
-    )
+    config_parser = create_config_parser()
     known_args, _ = config_parser.parse_known_args()
-
-    cfg: dict[str, Any] = {}
-    if known_args.config and known_args.config.is_file():
-        cfg = load_config(known_args.config)
-    elif known_args.config and known_args.config != Path("configs/default.yaml"):
-        raise FileNotFoundError(f"Config file not found: {known_args.config}")
-
-    paths_cfg = cfg.get("paths", {})
-    data_cfg = cfg.get("data", {})
-    model_cfg = cfg.get("model", {})
-    training_cfg = cfg.get("training", {})
-    runtime_cfg = cfg.get("runtime", {})
+    cfg = load_yaml_config(known_args)
 
     parser = argparse.ArgumentParser(
         description="Evaluate a moliv_rl classification checkpoint.",
@@ -57,12 +46,8 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to the checkpoint file.",
     )
-    parser.add_argument(
-        "--data-dir",
-        type=Path,
-        default=Path(paths_cfg.get("data_dir", "data")),
-        help="Directory containing split subdirectories.",
-    )
+    add_data_args(parser, cfg)
+    add_model_args(parser, cfg)
     parser.add_argument(
         "--split",
         type=str,
@@ -70,101 +55,21 @@ def parse_args() -> argparse.Namespace:
         help="Dataset split to evaluate.",
     )
     parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=data_cfg.get("batch_size", 32),
-        help="Evaluation batch size.",
-    )
-    parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=data_cfg.get("num_workers", 0),
-        help="Number of DataLoader worker processes.",
-    )
-    parser.add_argument(
-        "--pin-memory",
-        action=argparse.BooleanOptionalAction,
-        default=data_cfg.get("pin_memory", None),
-        help="Pin memory in DataLoader.",
-    )
-    parser.add_argument(
-        "--persistent-workers",
-        action=argparse.BooleanOptionalAction,
-        default=data_cfg.get("persistent_workers", None),
-        help="Use persistent workers in DataLoader.",
-    )
-    parser.add_argument(
-        "--model-name",
-        type=str,
-        choices=tuple(MODEL_REGISTRY.keys()),
-        default=model_cfg.get("name", "classification_model"),
-        help="Model architecture name.",
-    )
-    parser.add_argument(
-        "--block-dims",
-        type=int,
-        nargs="+",
-        default=model_cfg.get("block_dims", [32, 64, 128]),
-        help="Feature dimensions across model stages.",
-    )
-    parser.add_argument(
-        "--in-channels",
-        type=int,
-        default=model_cfg.get("in_channels", 3),
-        help="Number of input image channels.",
-    )
-    parser.add_argument(
-        "--out-channels",
-        type=int,
-        default=model_cfg.get("out_channels", 512),
-        help="Output feature dimension of the backbone.",
-    )
-    parser.add_argument(
-        "--patch-size",
-        type=int,
-        default=model_cfg.get("patch_size", 8),
-        help="Patch/stride size for the initial stem convolution.",
-    )
-    parser.add_argument(
-        "--dropout",
-        type=float,
-        default=model_cfg.get("dropout", 0.2),
-        help="Dropout rate in model blocks.",
-    )
-    parser.add_argument(
-        "--num-classes",
-        type=int,
-        default=model_cfg.get("num_classes", 10),
-        help="Number of output classes in the model.",
-    )
-    parser.add_argument(
-        "--optimize-model",
-        action=argparse.BooleanOptionalAction,
-        default=model_cfg.get("optimize", False),
-        help="Compile model using torch.compile.",
-    )
-    parser.add_argument(
-        "--image-size",
-        type=int,
-        default=data_cfg.get("image_size", 64),
-        help="Input image size expected by the model.",
-    )
-    parser.add_argument(
         "--precision-average",
         choices=("micro", "macro", "weighted"),
-        default=training_cfg.get("precision_average", "macro"),
+        default=cfg.get("training", {}).get("precision_average", "macro"),
         help="Averaging strategy for validation precision.",
     )
     parser.add_argument(
         "--device",
         type=str,
-        default=runtime_cfg.get("device", "auto"),
+        default=cfg.get("runtime", {}).get("device", "auto"),
         help="Compute device, for example cpu, cuda, cuda:0, or mps.",
     )
     parser.add_argument(
         "--use-amp",
         action="store_true",
-        default=training_cfg.get("use_amp", False),
+        default=cfg.get("training", {}).get("use_amp", False),
         help="Use CUDA automatic mixed precision during evaluation.",
     )
     parser.add_argument(
@@ -182,10 +87,10 @@ def parse_args() -> argparse.Namespace:
 def create_dataset(args: argparse.Namespace) -> ImageFolder:
     r"""create_dataset(args) -> ImageFolder
 
-    Create an :class:`~torchvision.datasets.ImageFolder` dataset for the specified evaluation split.
+    Create an ImageFolder dataset for the specified evaluation split.
 
     Args:
-        args (argparse.Namespace): Parsed CLI arguments containing data directory and split name.
+        args: Parsed CLI arguments containing data directory and split name.
 
     Returns:
         ImageFolder: Instantiated dataset for evaluation.
@@ -206,12 +111,12 @@ def create_dataloader(
 ) -> DataLoader:
     r"""create_dataloader(dataset, args, device) -> DataLoader
 
-    Create an evaluation :class:`~torch.utils.data.DataLoader`.
+    Create an evaluation DataLoader.
 
     Args:
-        dataset (ImageFolder): Evaluation dataset instance.
-        args (argparse.Namespace): Parsed CLI arguments containing batch size and worker counts.
-        device (torch.device): Execution device used to infer memory pinning.
+        dataset: Evaluation dataset instance.
+        args: Parsed CLI arguments containing batch size and worker counts.
+        device: Execution device used to infer memory pinning.
 
     Returns:
         DataLoader: Configured evaluation DataLoader.

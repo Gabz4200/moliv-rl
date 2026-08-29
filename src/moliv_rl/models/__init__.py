@@ -12,12 +12,12 @@ from .mobilenetv3 import (
 from .my_model import (
     MODEL_REGISTRY,
     ClassificationModel,
+    GatedConv2D,
     LiVConv2D,
     MLPConv2D,
     MyBlock,
     MyModel,
     MyVideoModel,
-    SwiGluConv2D,
     get_model,
 )
 
@@ -34,7 +34,7 @@ __all__ = [
     "MyModel",
     "MyVideoModel",
     "SEModule",
-    "SwiGluConv2D",
+    "GatedConv2D",
     "get_model",
     "mobilenetv3_large",
     "mobilenetv3_small",

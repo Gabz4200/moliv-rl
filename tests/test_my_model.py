@@ -5,12 +5,12 @@ import torch
 
 from moliv_rl import (
     ClassificationModel,
+    GatedConv2D,
     LiVConv2D,
     MLPConv2D,
     MyBlock,
     MyModel,
     MyVideoModel,
-    SwiGluConv2D,
     get_model,
 )
 
@@ -18,11 +18,11 @@ from moliv_rl import (
 class TestConvolutionBlocks:
     """Behavioral tests for custom 2D convolution building blocks."""
 
-    @pytest.mark.parametrize("block_cls", [LiVConv2D, MLPConv2D, SwiGluConv2D])
+    @pytest.mark.parametrize("block_cls", [LiVConv2D, MLPConv2D, GatedConv2D])
     @pytest.mark.parametrize("use_norm", [True, False])
     def test_block_same_channels_residual_and_gradient(
         self,
-        block_cls: type[LiVConv2D | MLPConv2D | SwiGluConv2D],
+        block_cls: type[LiVConv2D | MLPConv2D | GatedConv2D],
         use_norm: bool,
     ) -> None:
         block = block_cls(
@@ -41,10 +41,10 @@ class TestConvolutionBlocks:
         assert x.grad is not None
         assert not torch.isnan(x.grad).any()
 
-    @pytest.mark.parametrize("block_cls", [LiVConv2D, MLPConv2D, SwiGluConv2D])
-    def test_block_channel_change_no_residual(
+    @pytest.mark.parametrize("block_cls", [LiVConv2D, MLPConv2D, GatedConv2D])
+    def test_block_channel_change_residual_auto_disabled(
         self,
-        block_cls: type[LiVConv2D | MLPConv2D | SwiGluConv2D],
+        block_cls: type[LiVConv2D | MLPConv2D | GatedConv2D],
     ) -> None:
         block = block_cls(
             in_channels=16,
@@ -57,10 +57,10 @@ class TestConvolutionBlocks:
         out = block(x)
         assert out.shape == (2, 32, 20, 20)
 
-    @pytest.mark.parametrize("block_cls", [LiVConv2D, MLPConv2D, SwiGluConv2D])
+    @pytest.mark.parametrize("block_cls", [LiVConv2D, MLPConv2D, GatedConv2D])
     def test_block_eval_determinism(
         self,
-        block_cls: type[LiVConv2D | MLPConv2D | SwiGluConv2D],
+        block_cls: type[LiVConv2D | MLPConv2D | GatedConv2D],
     ) -> None:
         block = block_cls(
             in_channels=16,
@@ -77,10 +77,10 @@ class TestConvolutionBlocks:
 
         assert torch.equal(out1, out2)
 
-    @pytest.mark.parametrize("block_cls", [LiVConv2D, MLPConv2D, SwiGluConv2D])
+    @pytest.mark.parametrize("block_cls", [LiVConv2D, MLPConv2D, GatedConv2D])
     def test_block_channels_last_compatibility(
         self,
-        block_cls: type[LiVConv2D | MLPConv2D | SwiGluConv2D],
+        block_cls: type[LiVConv2D | MLPConv2D | GatedConv2D],
     ) -> None:
         block = block_cls(in_channels=16, hidden_channels=32, out_channels=16)
         block.to(memory_format=torch.channels_last)  # type: ignore[call-arg,no-matching-overload]

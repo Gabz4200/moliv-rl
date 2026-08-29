@@ -20,6 +20,7 @@ dependencies = [
     "omegaconf",
     "matplotlib>=3.11.1",
     "einops>=0.8.2",
+    "datasets>=3.0.0",
 ]
 
 [build-system]

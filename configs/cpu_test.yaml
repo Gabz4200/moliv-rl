@@ -1,4 +1,4 @@
-# Default training and evaluation configuration for moliv_rl.
+# Lightweight CPU training configuration for local testing.
 
 project:
   name: "moliv_rl"
@@ -12,17 +12,17 @@ paths:
   plots_dir: null
 
 data:
-  dataset_type: "local"
+  dataset_type: "streaming"
   dataset_id: "OpenMOSS-Team/GameQA-140K"
   train_split: "preview"
   validation_split: "preview"
   image_size: 256
-  batch_size: 32
-  num_workers: 2
-  pin_memory: true
-  persistent_workers: true
-  max_train_samples: null
-  max_val_samples: null
+  batch_size: 1
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  max_train_samples: 128
+  max_val_samples: 32
 
 model:
   name: "classification_model"
@@ -31,7 +31,7 @@ model:
     - 64
     - 128
   in_channels: 3
-  out_channels: 512
+  out_channels: 256
   patch_size: 8
   dropout: 0.2
   num_classes: 30
@@ -52,12 +52,12 @@ loss:
   label_smoothing: 0.0
 
 training:
-  epochs: 10
-  gradient_accumulation_steps: 1
+  epochs: 3
+  gradient_accumulation_steps: 2
   use_amp: false
   precision_average: "macro"
 
 runtime:
-  device: "auto"
+  device: "cpu"
   save_best: true
   save_last: true

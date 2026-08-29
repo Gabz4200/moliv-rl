@@ -1,4 +1,4 @@
-# Default training and evaluation configuration for moliv_rl.
+# GPU training configuration for Kaggle (2x T4).
 
 project:
   name: "moliv_rl"
@@ -12,17 +12,17 @@ paths:
   plots_dir: null
 
 data:
-  dataset_type: "local"
+  dataset_type: "streaming"
   dataset_id: "OpenMOSS-Team/GameQA-140K"
   train_split: "preview"
   validation_split: "preview"
   image_size: 256
-  batch_size: 32
+  batch_size: 64
   num_workers: 2
   pin_memory: true
   persistent_workers: true
-  max_train_samples: null
-  max_val_samples: null
+  max_train_samples: 20000
+  max_val_samples: 4000
 
 model:
   name: "classification_model"
@@ -30,6 +30,7 @@ model:
     - 32
     - 64
     - 128
+    - 256
   in_channels: 3
   out_channels: 512
   patch_size: 8
@@ -54,10 +55,10 @@ loss:
 training:
   epochs: 10
   gradient_accumulation_steps: 1
-  use_amp: false
+  use_amp: true
   precision_average: "macro"
 
 runtime:
-  device: "auto"
+  device: "cuda"
   save_best: true
   save_last: true

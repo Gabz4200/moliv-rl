@@ -200,6 +200,7 @@ __all__ = [
     "get_dataloaders",
     "get_default_datasets",
     "get_streaming_gameqa_datasets",
+    "get_streaming_hf_datasets",
     "lejepa_collate",
 ]
 
@@ -313,7 +314,7 @@ class StreamingGameQADataset(IterableDataset):
 
             if isinstance(image, dict):
                 if "bytes" in image:
-                    image = Image.open(io.BytesIO(image["bytes"]))
+                    image = Image.open(io.BytesIO(image["bytes"])).convert("RGB")
                 elif "path" in image:
                     image = Image.open(image["path"]).convert("RGB")
                 else:
@@ -326,12 +327,16 @@ class StreamingGameQADataset(IterableDataset):
             if self._transform is not None:
                 image = self._transform(image)
 
-            if label not in self._label2id:
-                self._label2id[label] = self._next_label_id
-                self._id2label[self._next_label_id] = label
-                self._next_label_id += 1
+            if isinstance(label, int):
+                label_id = label
+            else:
+                if label not in self._label2id:
+                    self._label2id[label] = self._next_label_id
+                    self._id2label[self._next_label_id] = label
+                    self._next_label_id += 1
 
-            label_id = self._label2id[label]
+                label_id = self._label2id[label]
+
             yield (image, torch.tensor(label_id, dtype=torch.long))
 
     def get_label_name(self, label_id: int) -> str:
@@ -354,6 +359,30 @@ class StreamingGameQADataset(IterableDataset):
     def id2label(self) -> dict[int, str]:
         """Mapping from class indices back to ``game_name`` strings."""
         return dict(self._id2label)
+
+    def class_distribution(self) -> dict[str, int]:
+        """Return the class distribution for map-style datasets.
+
+        For :class:`StreamingGameQADataset`, returns counts only when the
+        underlying dataset is a map-style dataset.  Iterable streaming
+        datasets cannot be safely iterated multiple times, so this method
+        returns an empty dict for those.
+        """
+        try:
+            from datasets import IterableDataset as HfIterableDataset
+        except ImportError:
+            HfIterableDataset = None
+
+        if HfIterableDataset is not None and isinstance(
+            self._hf_dataset, HfIterableDataset
+        ):
+            return {}
+        counts: dict[str, int] = {}
+        for example in self._hf_dataset:
+            label = example[self._label_column]  # type: ignore[bad-index]
+            name = self.get_label_name(int(label))
+            counts[name] = counts.get(name, 0) + 1
+        return counts
 
 
 def get_streaming_gameqa_datasets(
@@ -393,6 +422,69 @@ def get_streaming_gameqa_datasets(
             train=False,
             label2id=train_dataset.label2id,
             max_samples=max_val_samples,
+        )
+        val_dataset = StreamingGameQADataset(config=val_config)
+
+    return train_dataset, val_dataset
+
+
+def get_streaming_hf_datasets(
+    dataset_id: str = "uoft-cs/cifar10",
+    image_column: str = "img",
+    label_column: str = "label",
+    image_size: int = 32,
+    train_split: str = "train",
+    val_split: str | None = "test",
+    max_train_samples: int | None = None,
+    max_val_samples: int | None = None,
+    **dataset_kwargs: Any,
+) -> tuple[StreamingGameQADataset, StreamingGameQADataset | None]:
+    """Create streaming train/val datasets for generic HF image-classification datasets.
+
+    A convenience wrapper around :class:`StreamingGameQADataset` that infers the
+    label vocabulary from the training split and reuses it for validation.
+
+    Args:
+        dataset_id: Hugging Face dataset repository ID.
+        image_column: Name of the column containing images.
+        label_column: Name of the column containing class labels.
+        image_size: Target spatial resolution for the image pipeline.
+        train_split: Hugging Face split name for training data.
+        val_split: Hugging Face split name for validation data. Pass ``None``
+            to skip the validation dataset.
+        max_train_samples: Optional limit on the number of training samples.
+        max_val_samples: Optional limit on the number of validation samples.
+        **dataset_kwargs: Extra keyword arguments forwarded to
+            :class:`StreamingGameQADatasetConfig`.
+
+    Returns:
+        A ``(train_dataset, val_dataset)`` pair. ``val_dataset`` is ``None``
+        when ``val_split`` is ``None``.
+    """
+    train_config = StreamingGameQADatasetConfig(
+        dataset_id=dataset_id,
+        split=train_split,
+        image_column=image_column,
+        label_column=label_column,
+        image_size=image_size,
+        train=True,
+        max_samples=max_train_samples,
+        **dataset_kwargs,
+    )
+    train_dataset = StreamingGameQADataset(config=train_config)
+
+    val_dataset = None
+    if val_split is not None:
+        val_config = StreamingGameQADatasetConfig(
+            dataset_id=dataset_id,
+            split=val_split,
+            image_column=image_column,
+            label_column=label_column,
+            image_size=image_size,
+            train=False,
+            label2id=train_dataset.label2id,
+            max_samples=max_val_samples,
+            **dataset_kwargs,
         )
         val_dataset = StreamingGameQADataset(config=val_config)
 

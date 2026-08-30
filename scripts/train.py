@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import matplotlib
 
@@ -18,7 +18,10 @@ from torch.utils.data import DataLoader, IterableDataset
 from torchvision.datasets import ImageFolder
 
 from moliv_rl.data.dataset import MultiViewDataset, lejepa_collate
-from moliv_rl.data.transforms import MultiViewTransform, get_train_transforms
+from moliv_rl.data.transforms import (
+    MultiViewTransform,
+    get_train_transforms,
+)
 from moliv_rl.losses import LeJepaLoss, SIGReg, WeakSIGReg
 from moliv_rl.losses.focal_loss import FocalLoss
 from moliv_rl.metrics import PrecisionAverage
@@ -32,10 +35,13 @@ from scripts.common import (
     add_model_args,
     build_dataloaders,
     build_datasets,
+    build_model,
     create_config_parser,
-    load_yaml_config,
 )
-from scripts.utils import load_config, resolve_device  # noqa: F401
+from scripts.utils import (
+    load_config,  # noqa: F401
+    resolve_device,
+)
 
 
 def _serialize_args(
@@ -109,291 +115,293 @@ def _add_training_mode_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]
         default=training_cfg.get("num_views", 2),
         help="Number of augmented views per sample for LeJEPA training.",
     )
-
-
-def _add_sigreg_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
-    sigreg_cfg = cfg.get("sigreg", {})
     parser.add_argument(
-        "--sigreg-enabled",
-        action=argparse.BooleanOptionalAction,
-        default=sigreg_cfg.get("enabled", False),
-        help="Enable SIGReg regularization on classification features.",
+        "--use-probe",
+        type=bool,
+        default=training_cfg.get("use_probe", True),
+        help="Whether to attach a linear probe during LeJEPA evaluation.",
     )
-    parser.add_argument(
-        "--sigreg-weight",
-        type=float,
-        default=sigreg_cfg.get("weight", 0.01),
-        help="Weight for the SIGReg term in the classification loss.",
-    )
-    parser.add_argument(
-        "--sigreg-sketch-dim",
-        type=int,
-        default=sigreg_cfg.get("sketch_dim", 64),
-        help="Sketch dimension for SIGReg random projections.",
-    )
-    parser.add_argument(
-        "--sigreg-integration-points",
-        type=int,
-        default=sigreg_cfg.get("num_integration_points", 17),
-        help="Number of quadrature points for SIGReg integration.",
-    )
-    parser.add_argument(
-        "--sigreg-integration-t-max",
-        type=float,
-        default=sigreg_cfg.get("integration_t_max", 3.0),
-        help="Upper bound for SIGReg integration domain.",
-    )
-    parser.add_argument(
-        "--sigreg-lamb",
-        type=float,
-        default=sigreg_cfg.get("lamb", 0.02),
-        help="SIGReg trade-off weight for LeJEPA loss.",
-    )
-    parser.add_argument(
-        "--sigreg-type",
-        choices=("strong", "weak"),
-        default=sigreg_cfg.get("type", "strong"),
-        help="SIGReg variant: strong (SIGReg) or weak (WeakSIGReg).",
-    )
-
-
-def _add_projector_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
-    projector_cfg = cfg.get("projector", {})
-    training_cfg = cfg.get("training", {})
     parser.add_argument(
         "--projector-hidden-dim",
         type=int,
-        default=projector_cfg.get("hidden_dim", 2048),
-        help="Hidden dimension of the LeJEPA projection MLP.",
+        default=training_cfg.get("projector_hidden_dim", 2048),
+        help="Hidden dimension for the LeJEPA projector MLP.",
     )
     parser.add_argument(
         "--projector-out-dim",
         type=int,
-        default=projector_cfg.get("out_dim", 128),
-        help="Output dimension of the LeJEPA projection head.",
+        default=training_cfg.get("projector_out_dim", 128),
+        help="Output dimension for the LeJEPA projector MLP.",
     )
     parser.add_argument(
-        "--use-probe",
-        action=argparse.BooleanOptionalAction,
-        default=training_cfg.get("use_probe", True),
-        help="Use an online linear probe during LeJEPA training.",
+        "--sigreg-lamb",
+        type=float,
+        default=training_cfg.get("sigreg_lamb", 0.02),
+        help="SIGReg regularization weight in the LeJEPA loss.",
+    )
+    parser.add_argument(
+        "--sigreg-sketch-dim",
+        type=int,
+        default=training_cfg.get("sigreg_sketch_dim", 64),
+        help="Sketch dimension for SIGReg.",
+    )
+    parser.add_argument(
+        "--sigreg-integration-points",
+        type=int,
+        default=training_cfg.get("sigreg_integration_points", 17),
+        help="Number of integration points for SIGReg.",
+    )
+    parser.add_argument(
+        "--sigreg-integration-t-max",
+        type=float,
+        default=training_cfg.get("sigreg_integration_t_max", 3.0),
+        help="Maximum integration time for SIGReg.",
     )
 
 
-def _add_optimizer_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
-    optimizer_cfg = cfg.get("optimizer", {})
+def _add_dataset_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
+    data_cfg = cfg.get("data", {})
+    parser.add_argument(
+        "--dataset-type",
+        choices=("imagefolder", "streaming"),
+        default=data_cfg.get("dataset_type", "imagefolder"),
+        help="Dataset backend for training and validation data.",
+    )
+    parser.add_argument(
+        "--dataset-id",
+        default=data_cfg.get("dataset_id", "moliv-rl/gameqa-140k"),
+        help="Hugging Face dataset id for streaming mode.",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path(data_cfg.get("data_dir", "data")),
+        help="Root directory containing train/ and val/ folders for ImageFolder mode.",
+    )
+    parser.add_argument(
+        "--train-split",
+        default=data_cfg.get("train_split", "train"),
+        help="Dataset split to use for training.",
+    )
+    parser.add_argument(
+        "--val-split",
+        default=data_cfg.get("val_split", "val"),
+        help="Dataset split to use for validation.",
+    )
+    parser.add_argument(
+        "--max-train-samples",
+        type=int,
+        default=data_cfg.get("max_train_samples"),
+        help="Optional cap on training samples for streaming datasets.",
+    )
+    parser.add_argument(
+        "--max-val-samples",
+        type=int,
+        default=data_cfg.get("max_val_samples"),
+        help="Optional cap on validation samples for streaming datasets.",
+    )
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=data_cfg.get("image_size", 256),
+        help="Target image size for transforms.",
+    )
+    parser.add_argument(
+        "--pin-memory",
+        type=bool,
+        default=data_cfg.get("pin_memory"),
+        help="Enable pinned memory for DataLoader. Defaults based on device when unset.",
+    )
+    parser.add_argument(
+        "--persistent-workers",
+        type=bool,
+        default=data_cfg.get("persistent_workers"),
+        help="Enable persistent DataLoader workers. Defaults based on num_workers when unset.",
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    r"""parse_args() -> Namespace
+
+    Build the training CLI parser, merge defaults from the active config file,
+    and return parsed arguments.
+    """
+    parser = create_config_parser()
+    cfg: dict[str, Any] = {}
+
+    add_data_args(parser, cfg)
+    add_model_args(parser, cfg)
+    _add_training_mode_args(parser, cfg)
+    _add_dataset_args(parser, cfg)
+
+    training_cfg = cfg.get("training", {})
+    data_cfg = cfg.get("data", {})
+
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path(training_cfg.get("config", "configs/cpu_test.yaml")),
+        help="Path to the YAML config for this run.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=training_cfg.get("epochs", 3),
+        help="Number of training epochs.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=training_cfg.get("batch_size", 1),
+        help="Batch size for training and validation loaders.",
+    )
+    parser.add_argument(
+        "--grad-accum-steps",
+        type=int,
+        default=training_cfg.get("grad_accum_steps", 1),
+        help="Number of gradient accumulation steps before optimizer update.",
+    )
     parser.add_argument(
         "--optimizer",
-        choices=(
-            "adam",
-            "adamw",
-            "sgd",
-            "adagrad",
-            "lamb",
-            "lars",
-            "lion",
-            "rmsprop",
-            "adam8bit",
-            "adam32bit",
-            "pagedadam",
-            "pagedadam8bit",
-            "pagedadam32bit",
-            "adamw8bit",
-            "adamw32bit",
-            "pagedadamw",
-            "pagedadamw8bit",
-            "pagedadamw32bit",
-            "adagrad8bit",
-            "adagrad32bit",
-            "lamb8bit",
-            "lamb32bit",
-            "lars8bit",
-            "lars32bit",
-            "pytorchlars",
-            "lion8bit",
-            "lion32bit",
-            "pagedlion",
-            "pagedlion8bit",
-            "pagedlion32bit",
-            "rmsprop8bit",
-            "rmsprop32bit",
-            "sgd8bit",
-            "sgd32bit",
-        ),
-        default=optimizer_cfg.get("name", "adamw"),
-        help="Optimizer algorithm.",
+        default=training_cfg.get("optimizer", "adam"),
+        help="Optimizer name recognized by build_optimizer.",
     )
     parser.add_argument(
         "--lr",
         type=float,
-        default=optimizer_cfg.get("learning_rate", 1e-3),
+        default=training_cfg.get("lr", 1e-3),
         help="Initial learning rate.",
     )
     parser.add_argument(
         "--weight-decay",
         type=float,
-        default=optimizer_cfg.get("weight_decay", 1e-4),
-        help="Optimizer weight decay.",
+        default=training_cfg.get("weight_decay", 0.0),
+        help="Weight decay applied to the optimizer.",
     )
     parser.add_argument(
         "--momentum",
         type=float,
-        default=optimizer_cfg.get("momentum", 0.9),
-        help="Momentum factor for SGD/LARS/LION-style optimizers.",
+        default=training_cfg.get("momentum", 0.9),
+        help="Momentum factor for SGD-style optimizers.",
     )
-
-
-def _add_loss_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
-    loss_cfg = cfg.get("loss", {})
-    parser.add_argument(
-        "--loss",
-        choices=("cross_entropy", "focal_loss", "focal"),
-        default=loss_cfg.get("name", "cross_entropy"),
-        help="Loss function criterion.",
-    )
-    parser.add_argument(
-        "--label-smoothing",
-        type=float,
-        default=loss_cfg.get("label_smoothing", 0.0),
-        help="Label smoothing factor.",
-    )
-
-
-def _add_scheduler_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
-    scheduler_cfg = cfg.get("scheduler", {})
     parser.add_argument(
         "--scheduler",
-        choices=("cosine_annealing", "cosine", "none"),
-        default=scheduler_cfg.get("name", "cosine_annealing"),
-        help="Learning rate scheduler.",
+        default=training_cfg.get("scheduler", "none"),
+        help="Learning rate scheduler name.",
     )
     parser.add_argument(
         "--scheduler-interval",
         choices=("epoch", "step"),
-        default=scheduler_cfg.get("interval", "epoch"),
-        help="How often to step the learning-rate scheduler.",
+        default=training_cfg.get("scheduler_interval", "epoch"),
+        help="Scheduler stepping frequency.",
     )
     parser.add_argument(
         "--eta-min",
         type=float,
-        default=scheduler_cfg.get("eta_min", 0.0),
+        default=training_cfg.get("eta_min", 0.0),
         help="Minimum learning rate for cosine annealing.",
     )
-
-
-def _add_training_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
-    training_cfg = cfg.get("training", {})
-    runtime_cfg = cfg.get("runtime", {})
-    project_cfg = cfg.get("project", {})
-    paths_cfg = cfg.get("paths", {})
-
     parser.add_argument(
-        "--epochs",
-        type=int,
-        default=training_cfg.get("epochs", 10),
-        help="Number of training epochs.",
+        "--loss",
+        default=training_cfg.get("loss", "cross_entropy"),
+        help="Loss function name.",
     )
     parser.add_argument(
-        "--grad-accum-steps",
-        type=int,
-        default=training_cfg.get("gradient_accumulation_steps", 1),
-        help="Number of batches to accumulate before optimizer.step().",
+        "--label-smoothing",
+        type=float,
+        default=training_cfg.get("label_smoothing", 0.0),
+        help="Label smoothing factor for cross entropy / focal loss.",
     )
     parser.add_argument(
         "--precision-average",
-        choices=("micro", "macro", "weighted"),
         default=training_cfg.get("precision_average", "macro"),
-        help="Averaging strategy for validation precision.",
+        help="Precision averaging strategy.",
+    )
+    parser.add_argument(
+        "--sigreg-type",
+        default=training_cfg.get("sigreg_type", "strong"),
+        help="SIGReg implementation to use.",
+    )
+    parser.add_argument(
+        "--use-amp",
+        type=bool,
+        default=training_cfg.get("use_amp", False),
+        help="Enable automatic mixed precision on CUDA.",
     )
     parser.add_argument(
         "--device",
-        type=str,
-        default=runtime_cfg.get("device", "auto"),
-        help="Device, for example cpu, cuda, cuda:0, or mps.",
+        default=training_cfg.get("device", "auto"),
+        help="Compute device. Use 'cpu' or 'cuda' or 'auto'.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=data_cfg.get("num_workers", 0),
+        help="DataLoader worker processes.",
     )
     parser.add_argument(
         "--seed",
         type=int,
-        default=project_cfg.get("seed", 42069),
-        help="Random seed.",
+        default=training_cfg.get("seed", 42),
+        help="Random seed for reproducibility.",
     )
     parser.add_argument(
-        "--use-amp",
-        action="store_true",
-        default=training_cfg.get("use_amp", False),
-        help="Use CUDA automatic mixed precision.",
+        "--checkpoint-dir",
+        type=Path,
+        default=Path(training_cfg.get("checkpoint_dir", "checkpoints")),
+        help="Directory for saved checkpoints.",
     )
     parser.add_argument(
-        "--save-best",
-        action=argparse.BooleanOptionalAction,
-        default=runtime_cfg.get("save_best", True),
-        help="Save best checkpoint on validation accuracy improvement.",
+        "--checkpoint",
+        type=Path,
+        default=training_cfg.get("checkpoint"),
+        help="Optional checkpoint path to resume training or evaluation.",
     )
     parser.add_argument(
         "--save-last",
-        action=argparse.BooleanOptionalAction,
-        default=runtime_cfg.get("save_last", True),
-        help="Save checkpoint after every epoch.",
+        type=bool,
+        default=training_cfg.get("save_last", True),
+        help="Save a last checkpoint every epoch.",
+    )
+    parser.add_argument(
+        "--save-best",
+        type=bool,
+        default=training_cfg.get("save_best", True),
+        help="Save a best checkpoint when validation accuracy improves.",
+    )
+    parser.add_argument(
+        "--safe-load",
+        type=bool,
+        default=training_cfg.get("safe_load", True),
+        help="Use weights_only loading when restoring checkpoints.",
     )
     parser.add_argument(
         "--results-dir",
         type=Path,
-        default=Path(paths_cfg.get("results_dir", "results")),
-        help="Root directory for metrics and plots outputs.",
+        default=Path(training_cfg.get("results_dir", "results")),
+        help="Directory for metrics and plots.",
     )
     parser.add_argument(
         "--metrics-file",
         type=Path,
-        default=paths_cfg.get("metrics_file"),
-        help="Explicit metrics txt path. Defaults to a timestamped file",
+        default=Path(training_cfg.get("metrics_file")) if training_cfg.get("metrics_file") else None,
+        help="Explicit metrics file path.",
     )
     parser.add_argument(
         "--plots-dir",
         type=Path,
-        default=paths_cfg.get("plots_dir"),
-        help="Explicit plots directory. Defaults to a timestamped directory",
+        default=Path(training_cfg.get("plots_dir")) if training_cfg.get("plots_dir") else None,
+        help="Explicit plots directory path.",
     )
-
-
-def parse_args() -> argparse.Namespace:
-    r"""parse_args() -> argparse.Namespace
-
-    Parse CLI options merged with default YAML configuration settings.
-
-    Returns:
-        argparse.Namespace: Populated argument namespace.
-    """
-    config_parser = create_config_parser()
-    known_args, _ = config_parser.parse_known_args()
-    cfg = load_yaml_config(known_args)
-
-    parser = argparse.ArgumentParser(
-        description="Train a moliv_rl PyTorch model.",
-        parents=[config_parser],
-    )
-
-    add_data_args(parser, cfg)
-    add_model_args(parser, cfg)
-    _add_optimizer_args(parser, cfg)
-    _add_loss_args(parser, cfg)
-    _add_scheduler_args(parser, cfg)
-    _add_training_args(parser, cfg)
-    _add_training_mode_args(parser, cfg)
-    _add_sigreg_args(parser, cfg)
-    _add_projector_args(parser, cfg)
 
     return parser.parse_args()
 
 
+def _build_sigreg_loss(args: argparse.Namespace) -> nn.Module:
+    r"""_build_sigreg_loss(args) -> nn.Module
 
-
-
-
-def _build_sigreg_loss(args: argparse.Namespace) -> nn.Module | None:
-    r"""Build a SIGReg loss module from CLI args, if enabled."""
-    if not getattr(args, "sigreg_enabled", False):
-        return None
-
+    Select the configured SIGReg implementation.
+    """
     sigreg_type = getattr(args, "sigreg_type", "strong")
     if sigreg_type == "weak":
         return WeakSIGReg(
@@ -441,30 +449,18 @@ def build_trainer(
     Returns:
         ClassificationTrainer | LeJepaTrainer: Initialized trainer instance.
     """
-    training_mode = getattr(args, "training_mode", "classification")
-
-    model_kwargs: dict[str, Any] = {
-        "block_dims": args.block_dims,
-        "in_channels": args.in_channels,
-        "out_channels": args.out_channels,
-        "patch_size": args.patch_size,
-        "dropout": args.dropout,
-    }
-    if args.model_name == "classification_model":
-        model_kwargs["num_classes"] = args.num_classes
+    training_mode: Literal["classification", "lejepa"] = getattr(
+        args, "training_mode", "classification"
+    )
 
     if training_mode == "lejepa":
-        if args.model_name == "classification_model":
+        if args.model_name in {"classification_model", "mobilenetv3_pretrained"}:
             raise ValueError(
                 "LeJEPA training requires a backbone model without the classification head. "
                 "Use --model-name my_model."
             )
 
-        model = get_model(
-            model_name=args.model_name,
-            optimize=args.optimize_model,
-            **model_kwargs,
-        )
+        model = build_model(args, device)
 
         projector = _build_lejepa_projector(
             in_dim=args.out_channels,
@@ -530,11 +526,7 @@ def build_trainer(
         )
 
     # Classification mode
-    model = get_model(
-        model_name=args.model_name,
-        optimize=args.optimize_model,
-        **model_kwargs,
-    )
+    model = build_model(args, device)
 
     if args.loss in ("focal_loss", "focal"):
         criterion: nn.Module = FocalLoss(
@@ -583,6 +575,52 @@ def build_trainer(
         sigreg_loss_fn=sigreg_loss_fn,
         sigreg_weight=getattr(args, "sigreg_weight", 0.0),
     )
+
+
+def _plot_history(history: list[dict[str, Any]], plots_dir: Path) -> None:
+    r"""_plot_history(history, plots_dir)
+
+    Generate line plots for training/validation loss, accuracy, and precision.
+    """
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    epochs = [entry["epoch"] for entry in history]
+    train_loss = [entry["train_loss"] for entry in history]
+    val_loss = [entry["val_loss"] for entry in history]
+    val_acc = [entry["val_acc"] for entry in history]
+    val_precision = [entry["val_precision"] for entry in history]
+
+    plots = {
+        "loss": (train_loss, val_loss, "Loss", "train_loss", "val_loss"),
+        "accuracy": (None, val_acc, "Accuracy", None, "val_acc"),
+        "precision": (None, val_precision, "Precision", None, "val_precision"),
+    }
+
+    for name, (train_values, val_values, title, train_label, val_label) in plots.items():
+        plt.figure(figsize=(8, 5))
+        if train_values is not None:
+            plt.plot(epochs, train_values, label=train_label, marker="o")
+        plt.plot(epochs, val_values, label=val_label, marker="o")
+        plt.title(title)
+        plt.xlabel("Epoch")
+        plt.ylabel(title)
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(plots_dir / f"{name}.png", dpi=150)
+        plt.close()
+
+    # Combined metrics plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs, val_acc, label="val_acc", marker="o")
+    plt.plot(epochs, val_precision, label="val_precision", marker="o")
+    plt.title("Validation Accuracy and Precision")
+    plt.xlabel("Epoch")
+    plt.ylabel("Metric value")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(plots_dir / "combined_metrics.png", dpi=150)
+    plt.close()
 
 
 def _save_metrics(
@@ -681,6 +719,314 @@ def _save_plots(
     plt.close()
 
 
+def _log_class_distribution(
+    train_dataset: Any,
+    val_dataset: Any,
+    logger: logging.Logger,
+) -> None:
+    r"""_log_class_distribution(train_dataset, val_dataset, logger)
+
+    Log class distribution for datasets that expose it.
+    """
+    if hasattr(train_dataset, "class_distribution"):
+        train_dist = train_dataset.class_distribution()
+        if train_dist:
+            logger.info("Train class distribution: %s", dict(sorted(train_dist.items())))
+
+    if val_dataset is not None and hasattr(val_dataset, "class_distribution"):
+        val_dist = val_dataset.class_distribution()
+        if val_dist:
+            logger.info("Val class distribution: %s", dict(sorted(val_dist.items())))
+
+
+def _build_lejepa_dataloaders(
+    train_dataset: Any,
+    val_dataset: Any | None,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> tuple[DataLoader, DataLoader | None, Any]:
+    r"""_build_lejepa_dataloaders(train_dataset, val_dataset, args, device) -> Tuple[DataLoader, DataLoader | None, Any]
+
+    Wrap datasets in multi-view transforms and build deterministic DataLoaders
+    for LeJEPA self-supervised training.
+
+    Args:
+        train_dataset (Any): Raw training dataset.
+        val_dataset (Any, optional): Raw validation dataset.
+        args (argparse.Namespace): Experiment hyperparameter configuration.
+        device (torch.device): Compute device for memory pinning.
+
+    Returns:
+        tuple: ``(train_loader, val_loader, train_mv_dataset)`` with ``val_loader`` possibly ``None``.
+    """
+    mv_transform = MultiViewTransform(
+        transform=get_train_transforms(image_size=args.image_size),
+        num_views=getattr(args, "num_views", 2),
+    )
+    train_mv_dataset = MultiViewDataset(
+        dataset=train_dataset,
+        transform=mv_transform,
+        num_views=getattr(args, "num_views", 2),
+    )
+
+    val_mv_dataset = None
+    if val_dataset is not None:
+        val_mv_dataset = MultiViewDataset(
+            dataset=val_dataset,
+            transform=mv_transform,
+            num_views=getattr(args, "num_views", 2),
+        )
+
+    generator = torch.Generator()
+    generator.manual_seed(args.seed)
+
+    pin_memory = args.pin_memory if args.pin_memory is not None else (device.type == "cuda")
+    use_persistent = args.persistent_workers if args.persistent_workers is not None else (args.num_workers > 0)
+
+    train_loader = DataLoader(
+        train_mv_dataset,
+        batch_size=args.batch_size,
+        shuffle=not isinstance(train_mv_dataset, IterableDataset),
+        num_workers=args.num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=use_persistent,
+        generator=generator,
+        collate_fn=lejepa_collate,
+    )
+
+    val_loader = None
+    if val_mv_dataset is not None:
+        val_loader = DataLoader(
+            val_mv_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=use_persistent,
+            generator=generator,
+            collate_fn=lejepa_collate,
+        )
+
+    return train_loader, val_loader, train_mv_dataset
+
+
+def _build_checkpoint_metadata(
+    args: argparse.Namespace,
+    train_dataset: ImageFolder | Any,
+    val_metrics: dict[str, float],
+) -> dict[str, Any]:
+    r"""_build_checkpoint_metadata(args, train_dataset, val_metrics) -> dict
+
+    Construct checkpoint metadata payload with serialized args and dataset info.
+
+    Args:
+        args (argparse.Namespace): Experiment hyperparameter configuration.
+        train_dataset (ImageFolder or Any): Training dataset used for class metadata.
+        val_metrics (dict): Current validation metrics to embed in checkpoint.
+
+    Returns:
+        dict: Checkpoint metadata dictionary.
+    """
+    metadata: dict[str, Any] = {
+        "args": _serialize_args(vars(args)),
+        **val_metrics,
+    }
+
+    if isinstance(train_dataset, ImageFolder):
+        metadata["classes"] = train_dataset.classes
+        metadata["class_to_idx"] = train_dataset.class_to_idx
+    elif hasattr(train_dataset, "label2id"):
+        metadata["classes"] = list(train_dataset.label2id.keys())
+        metadata["class_to_idx"] = train_dataset.label2id
+
+    return metadata
+
+
+def _train_and_validate(
+    trainer: ClassificationTrainer | LeJepaTrainer,
+    train_loader: DataLoader,
+    val_loader: DataLoader | None,
+    args: argparse.Namespace,
+    training_mode: Literal["classification", "lejepa"],
+    logger: logging.Logger,
+    train_dataset: ImageFolder | Any,
+) -> tuple[list[dict[str, Any]], float, int]:
+    r"""_train_and_validate(trainer, train_loader, val_loader, args, training_mode, logger, train_dataset) -> Tuple[list[dict], float, int]
+
+    Execute the training loop, logging, and checkpointing for all epochs.
+
+    Args:
+        trainer (ClassificationTrainer | LeJepaTrainer): Initialized trainer instance.
+        train_loader (DataLoader): Training data loader.
+        val_loader (DataLoader, optional): Validation data loader.
+        args (argparse.Namespace): Experiment hyperparameter configuration.
+        training_mode (str): Active training paradigm.
+        logger (logging.Logger): Logger for training progress.
+        train_dataset (ImageFolder or Any): Training dataset used for checkpoint metadata.
+
+    Returns:
+        tuple: ``(history, best_val_acc, best_epoch)`` from the training run.
+    """
+    best_val_acc = float("-inf")
+    best_epoch = 0
+    history: list[dict[str, Any]] = []
+
+    for epoch in range(1, args.epochs + 1):
+        train_metrics = trainer.train_epoch(
+            dataloader=train_loader,
+            epoch=epoch,
+            grad_accum_steps=args.grad_accum_steps,
+        )
+
+        if training_mode == "lejepa":
+            assert isinstance(trainer, LeJepaTrainer)
+            train_metrics = cast(dict[str, float], train_metrics)
+            train_loss = float(train_metrics.get("train_loss", 0.0))
+            val_metrics = (
+                trainer.evaluate_probe(
+                    dataloader=val_loader,
+                    precision_average=cast(
+                        PrecisionAverage,
+                        args.precision_average,
+                    )
+                    if val_loader is not None
+                    else "macro",
+                )
+                if val_loader is not None
+                else {"val_loss": 0.0, "val_acc": 0.0, "val_precision": 0.0}
+            )
+        else:
+            assert isinstance(trainer, ClassificationTrainer)
+            train_metrics = cast(float, train_metrics)
+            train_loss = float(train_metrics)
+            val_metrics = (
+                trainer.evaluate(
+                    dataloader=val_loader,
+                    precision_average=cast(
+                        PrecisionAverage,
+                        args.precision_average,
+                    )
+                    if val_loader is not None
+                    else "macro",
+                )
+                if val_loader is not None
+                else {"val_loss": 0.0, "val_acc": 0.0, "val_precision": 0.0}
+            )
+
+        if trainer.scheduler is not None:
+            learning_rate = trainer.scheduler.get_last_lr()[0]
+        else:
+            assert trainer.optimizer is not None
+            learning_rate = float(trainer.optimizer.param_groups[0]["lr"])
+
+        history_entry: dict[str, Any] = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_metrics.get("val_loss", 0.0),
+            "val_acc": val_metrics.get("val_acc", 0.0),
+            "val_precision": val_metrics.get("val_precision", 0.0),
+            "lr": learning_rate,
+        }
+
+        if training_mode == "lejepa":
+            assert isinstance(train_metrics, dict)
+            history_entry.update(
+                {
+                    "invariance_loss": train_metrics.get("invariance_loss", 0.0),
+                    "sigreg_loss": train_metrics.get("sigreg_loss", 0.0),
+                    "probe_loss": train_metrics.get("probe_loss", 0.0),
+                }
+            )
+
+        history.append(history_entry)
+
+        log_msg = (
+            f"Epoch {epoch:03d} | train_loss={train_loss:.6f} | "
+            f"val_loss={val_metrics.get('val_loss', 0.0):.6f} | "
+            f"val_acc={val_metrics.get('val_acc', 0.0):.4f} | "
+            f"val_precision={val_metrics.get('val_precision', 0.0):.4f}"
+        )
+        if training_mode == "lejepa":
+            assert isinstance(train_metrics, dict)
+            log_msg += (
+                f" | inv={train_metrics.get('invariance_loss', 0.0):.6f} | "
+                f"sigreg={train_metrics.get('sigreg_loss', 0.0):.6f} | "
+                f"probe={train_metrics.get('probe_loss', 0.0):.6f}"
+            )
+        logger.info(log_msg)
+
+        checkpoint_metadata = _build_checkpoint_metadata(
+            args, train_dataset, val_metrics
+        )
+
+        if args.save_last:
+            trainer.save_checkpoint(
+                args.checkpoint_dir / "model_last.pth",
+                epoch=epoch,
+                extra=checkpoint_metadata,
+            )
+
+        if val_metrics.get("val_acc", 0.0) >= best_val_acc:
+            best_val_acc = val_metrics.get("val_acc", 0.0)
+            best_epoch = epoch
+
+            if args.save_best:
+                trainer.save_checkpoint(
+                    args.checkpoint_dir / "model_best.pth",
+                    epoch=epoch,
+                    extra={
+                        **checkpoint_metadata,
+                        "best_val_acc": best_val_acc,
+                    },
+                )
+
+                logger.info(
+                    "New best checkpoint: val_acc=%.4f",
+                    best_val_acc,
+                )
+
+    return history, best_val_acc, best_epoch
+
+
+def _finalize_training(
+    result_paths: ResultPaths,
+    args: argparse.Namespace,
+    history: list[dict[str, Any]],
+    best_val_acc: float,
+    best_epoch: int,
+    logger: logging.Logger,
+) -> None:
+    r"""_finalize_training(result_paths, args, history, best_val_acc, best_epoch, logger)
+
+    Persist metrics, plots, and final training summary logs.
+
+    Args:
+        result_paths (ResultPaths): Resolved output paths for the training run.
+        args (argparse.Namespace): Experiment hyperparameter configuration.
+        history (list[dict]): Per-epoch training history.
+        best_val_acc (float): Best validation accuracy observed.
+        best_epoch (int): Epoch at which best validation accuracy was achieved.
+        logger (logging.Logger): Logger for final summary output.
+    """
+    _save_metrics(
+        metrics_file=result_paths.metrics_file,
+        args=args,
+        history=history,
+        best_val_acc=best_val_acc,
+        best_epoch=best_epoch,
+    )
+    logger.info("Metrics saved to %s", result_paths.metrics_file)
+
+    _save_plots(plots_dir=result_paths.plots_dir, history=history)
+    logger.info("Plots saved to %s", result_paths.plots_dir)
+
+    logger.info(
+        "Training complete. Best validation accuracy: %.4f at epoch %d",
+        best_val_acc,
+        best_epoch,
+    )
+
+
 def main() -> None:
     args = parse_args()
 
@@ -709,51 +1055,26 @@ def main() -> None:
 
     train_dataset, val_dataset = build_datasets(args)
 
-    training_mode = getattr(args, "training_mode", "classification")
+    if hasattr(train_dataset, "class_distribution"):
+        train_dist = train_dataset.class_distribution()
+        if train_dist:
+            logger.info("Train class distribution: %s", dict(sorted(train_dist.items())))
+
+    if val_dataset is not None and hasattr(val_dataset, "class_distribution"):
+        val_dist = val_dataset.class_distribution()
+        if val_dist:
+            logger.info("Val class distribution: %s", dict(sorted(val_dist.items())))
+
+    training_mode: Literal["classification", "lejepa"] = getattr(
+        args, "training_mode", "classification"
+    )
 
     if training_mode == "lejepa":
-        mv_transform = MultiViewTransform(
-            transform=get_train_transforms(image_size=args.image_size),
-            num_views=getattr(args, "num_views", 2),
-        )
-        train_dataset = MultiViewDataset(
-            dataset=train_dataset,
-            transform=mv_transform,
-            num_views=getattr(args, "num_views", 2),
-        )
-        if val_dataset is not None:
-            val_dataset = MultiViewDataset(
-                dataset=val_dataset,
-                transform=mv_transform,
-                num_views=getattr(args, "num_views", 2),
-            )
-
-        generator = torch.Generator()
-        generator.manual_seed(args.seed)
-
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=args.batch_size,
-            shuffle=not isinstance(train_dataset, IterableDataset),
-            num_workers=args.num_workers,
-            pin_memory=args.pin_memory if args.pin_memory is not None else (device.type == "cuda"),
-            persistent_workers=args.persistent_workers if args.persistent_workers is not None else (args.num_workers > 0),
-            generator=generator,
-            collate_fn=lejepa_collate,
-        )
-        val_loader = (
-            DataLoader(
-                val_dataset,
-                batch_size=args.batch_size,
-                shuffle=False,
-                num_workers=args.num_workers,
-                pin_memory=args.pin_memory if args.pin_memory is not None else (device.type == "cuda"),
-                persistent_workers=args.persistent_workers if args.persistent_workers is not None else (args.num_workers > 0),
-                generator=generator,
-                collate_fn=lejepa_collate,
-            )
-            if val_dataset is not None
-            else None
+        train_loader, val_loader, train_dataset = _build_lejepa_dataloaders(
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            args=args,
+            device=device,
         )
     else:
         if isinstance(train_dataset, ImageFolder):
@@ -795,138 +1116,23 @@ def main() -> None:
         steps_per_epoch=len(train_loader),
     )
 
-    best_val_acc = float("-inf")
-    best_epoch = 0
-    history: list[dict[str, Any]] = []
+    history, best_val_acc, best_epoch = _train_and_validate(
+        trainer=trainer,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        args=args,
+        training_mode=training_mode,
+        logger=logger,
+        train_dataset=train_dataset,
+    )
 
-    for epoch in range(1, args.epochs + 1):
-        train_metrics = trainer.train_epoch(
-            dataloader=train_loader,
-            epoch=epoch,
-            grad_accum_steps=args.grad_accum_steps,
-        )
-
-        if training_mode == "lejepa":
-            train_loss = float(train_metrics.get("train_loss", 0.0))
-            val_metrics = (
-                trainer.evaluate_probe(
-                    dataloader=val_loader,
-                    precision_average=cast(
-                        PrecisionAverage,
-                        args.precision_average,
-                    )
-                    if val_loader is not None
-                    else "macro",
-                )
-                if val_loader is not None
-                else {"val_loss": 0.0, "val_acc": 0.0, "val_precision": 0.0}
-            )
-        else:
-            train_loss = float(train_metrics) if isinstance(train_metrics, (int, float)) else train_metrics.get("train_loss", 0.0)
-            val_metrics = trainer.evaluate(
-                dataloader=val_loader,
-                precision_average=cast(
-                    PrecisionAverage,
-                    args.precision_average,
-                )
-                if val_loader is not None
-                else "macro",
-            )
-
-        learning_rate = (
-            trainer.scheduler.get_last_lr()[0]
-            if trainer.scheduler is not None
-            else float(trainer.optimizer.param_groups[0]["lr"])
-        )
-
-        history_entry: dict[str, Any] = {
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_loss": val_metrics.get("val_loss", 0.0),
-            "val_acc": val_metrics.get("val_acc", 0.0),
-            "val_precision": val_metrics.get("val_precision", 0.0),
-            "lr": learning_rate,
-        }
-
-        if training_mode == "lejepa":
-            history_entry.update(
-                {
-                    "invariance_loss": train_metrics.get("invariance_loss", 0.0),
-                    "sigreg_loss": train_metrics.get("sigreg_loss", 0.0),
-                    "probe_loss": train_metrics.get("probe_loss", 0.0),
-                }
-            )
-
-        history.append(history_entry)
-
-        log_msg = (
-            f"Epoch {epoch:03d} | train_loss={train_loss:.6f} | "
-            f"val_loss={val_metrics.get('val_loss', 0.0):.6f} | "
-            f"val_acc={val_metrics.get('val_acc', 0.0):.4f} | "
-            f"val_precision={val_metrics.get('val_precision', 0.0):.4f}"
-        )
-        if training_mode == "lejepa":
-            log_msg += (
-                f" | inv={train_metrics.get('invariance_loss', 0.0):.6f} | "
-                f"sigreg={train_metrics.get('sigreg_loss', 0.0):.6f} | "
-                f"probe={train_metrics.get('probe_loss', 0.0):.6f}"
-            )
-        logger.info(log_msg)
-
-        checkpoint_metadata: dict[str, Any] = {
-            "args": _serialize_args(vars(args)),
-            **val_metrics,
-        }
-
-        if isinstance(train_dataset, ImageFolder):
-            checkpoint_metadata["classes"] = train_dataset.classes
-            checkpoint_metadata["class_to_idx"] = train_dataset.class_to_idx
-        elif hasattr(train_dataset, "label2id"):
-            checkpoint_metadata["classes"] = list(train_dataset.label2id.keys())
-            checkpoint_metadata["class_to_idx"] = train_dataset.label2id
-
-        if args.save_last:
-            trainer.save_checkpoint(
-                args.checkpoint_dir / "model_last.pth",
-                epoch=epoch,
-                extra=checkpoint_metadata,
-            )
-
-        if val_metrics.get("val_acc", 0.0) >= best_val_acc:
-            best_val_acc = val_metrics.get("val_acc", 0.0)
-            best_epoch = epoch
-
-            if args.save_best:
-                trainer.save_checkpoint(
-                    args.checkpoint_dir / "model_best.pth",
-                    epoch=epoch,
-                    extra={
-                        **checkpoint_metadata,
-                        "best_val_acc": best_val_acc,
-                    },
-                )
-
-                logger.info(
-                    "New best checkpoint: val_acc=%.4f",
-                    best_val_acc,
-                )
-
-    _save_metrics(
-        metrics_file=result_paths.metrics_file,
+    _finalize_training(
+        result_paths=result_paths,
         args=args,
         history=history,
         best_val_acc=best_val_acc,
         best_epoch=best_epoch,
-    )
-    logger.info("Metrics saved to %s", result_paths.metrics_file)
-
-    _save_plots(plots_dir=result_paths.plots_dir, history=history)
-    logger.info("Plots saved to %s", result_paths.plots_dir)
-
-    logger.info(
-        "Training complete. Best validation accuracy: %.4f at epoch %d",
-        best_val_acc,
-        best_epoch,
+        logger=logger,
     )
 
 

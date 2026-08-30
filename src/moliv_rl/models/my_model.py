@@ -677,6 +677,83 @@ class MyVideoModel(nn.Module):
         return y_t, new_cache
 
 
+class PretrainedMobileNetV3(nn.Module):
+    r"""PretrainedMobileNetV3(num_classes=10, mode='large', freeze_backbone=False)
+
+    Transfer-learning wrapper around torchvision's pretrained MobileNetV3.
+
+    Loads ImageNet-pretrained weights and replaces the final classifier head
+    with a new linear layer for the target number of classes.
+
+    Args:
+        num_classes (int, optional): Number of target classification classes. Default: ``10``
+        mode (str, optional): Architecture variant ('large' or 'small'). Default: ``'large'``
+        freeze_backbone (bool, optional): If ``True``, freezes all backbone weights. Default: ``False``
+
+    Shape:
+        - Input: :math:`(N, 3, H, W)`
+        - Output: :math:`(N, \text{num\_classes})`
+
+    Examples::
+
+        >>> model = PretrainedMobileNetV3(num_classes=10)
+        >>> x = torch.randn(2, 3, 224, 224)
+        >>> logits = model(x)
+        >>> logits.shape
+        torch.Size([2, 10])
+    """
+
+    def __init__(
+        self,
+        num_classes: int = 10,
+        mode: str = "large",
+        freeze_backbone: bool = False,
+    ) -> None:
+        super().__init__()
+        from torchvision.models import MobileNet_V3_Large_Weights, mobilenet_v3_large
+
+        weights = MobileNet_V3_Large_Weights.DEFAULT if mode == "large" else None
+        if mode == "large":
+            backbone = mobilenet_v3_large(weights=weights)
+        else:
+            raise ValueError(
+                f"Unsupported mode '{mode}'. Only 'large' is currently supported for pretrained weights."
+            )
+
+        self.backbone = backbone.features
+        self.pool = backbone.avgpool
+
+        backbone_out = cast(int, backbone.classifier[0].in_features)
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(backbone_out, num_classes),
+        )
+
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+            for param in self.pool.parameters():
+                param.requires_grad = False
+
+        self.to(memory_format=torch.channels_last)  # type: ignore[call-arg]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.backbone(x)
+        x = self.pool(x)
+        x = self.classifier(x)
+        return x
+
+    def get_features(self, x: torch.Tensor) -> torch.Tensor:
+        r"""Return pre-pooling feature maps."""
+        return self.backbone(x)
+
+    def get_embedding(self, x: torch.Tensor) -> torch.Tensor:
+        r"""Return flat embedding vector for the input tensor."""
+        x = self.backbone(x)
+        x = self.pool(x)
+        return torch.flatten(x, 1)
+
+
 class ClassificationModel(nn.Module):
     r"""ClassificationModel(block_dims, in_channels=3, out_channels=512, patch_size=8, dropout=0.2, num_classes=1000)
 
@@ -766,6 +843,7 @@ MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "my_model": MyModel,
     "classification_model": ClassificationModel,
     "my_video_model": MyVideoModel,
+    "mobilenetv3_pretrained": PretrainedMobileNetV3,
 }
 
 
@@ -813,5 +891,6 @@ __all__ = [
     "MyBlock",
     "MyModel",
     "MyVideoModel",
+    "PretrainedMobileNetV3",
     "get_model",
 ]

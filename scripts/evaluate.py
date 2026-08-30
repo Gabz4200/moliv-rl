@@ -1,23 +1,30 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import logging
+from collections.abc import Sized
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision.datasets import ImageFolder
 
-from moliv_rl.data.transforms import get_val_transforms
 from moliv_rl.metrics import PrecisionAverage
-from moliv_rl.models import MODEL_REGISTRY, get_model  # noqa: F401
+from moliv_rl.models import MODEL_REGISTRY  # noqa: F401
 from moliv_rl.train.trainer import ClassificationTrainer
 from moliv_rl.utils.logger import get_logger
 from scripts.common import (
     add_data_args,
     add_model_args,
+    build_datasets,
+    build_model,
     create_config_parser,
     load_yaml_config,
 )
@@ -84,28 +91,37 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def create_dataset(args: argparse.Namespace) -> ImageFolder:
-    r"""create_dataset(args) -> ImageFolder
+def create_dataset(args: argparse.Namespace) -> Dataset:
+    r"""create_dataset(args) -> Dataset
 
-    Create an ImageFolder dataset for the specified evaluation split.
+    Create a dataset for the specified evaluation split. Supports both local
+    ImageFolder datasets and streaming Hugging Face datasets.
 
     Args:
-        args: Parsed CLI arguments containing data directory and split name.
+        args: Parsed CLI arguments containing data configuration.
 
     Returns:
-        ImageFolder: Instantiated dataset for evaluation.
+        Dataset: Instantiated dataset for evaluation.
     """
-    split_dir = args.data_dir / args.split
-    return ImageFolder(
-        root=split_dir,
-        transform=get_val_transforms(
-            image_size=args.image_size,
-        ),
+    train_dataset, val_dataset = build_datasets(args)
+
+    if args.split == "train":
+        return train_dataset
+
+    if val_dataset is not None:
+        return val_dataset
+
+    if hasattr(train_dataset, "label2id") and train_dataset.label2id:
+        return train_dataset
+
+    raise ValueError(
+        f"Unable to resolve evaluation split '{args.split}'. "
+        "Expected 'train' or a validation split."
     )
 
 
 def create_dataloader(
-    dataset: ImageFolder,
+    dataset: Dataset,
     args: argparse.Namespace,
     device: torch.device,
 ) -> DataLoader:
@@ -158,21 +174,7 @@ def create_trainer(
     Returns:
         ClassificationTrainer: Initialized evaluation trainer.
     """
-    model_kwargs: dict[str, Any] = {
-        "block_dims": args.block_dims,
-        "in_channels": args.in_channels,
-        "out_channels": args.out_channels,
-        "patch_size": args.patch_size,
-        "dropout": args.dropout,
-    }
-    if args.model_name == "classification_model":
-        model_kwargs["num_classes"] = args.num_classes
-
-    model = get_model(
-        model_name=args.model_name,
-        optimize=args.optimize_model,
-        **model_kwargs,
-    )
+    model = build_model(args, device)
 
     return ClassificationTrainer(
         model=model,
@@ -217,10 +219,17 @@ def main() -> None:
         device=device,
     )
 
+    if isinstance(dataset, ImageFolder):
+        num_classes = len(dataset.classes)
+    elif hasattr(dataset, "label2id") and dataset.label2id:
+        num_classes = len(dataset.label2id)
+    else:
+        num_classes = getattr(args, "num_classes", "?")
+
     logger.info(
         "Evaluating %d samples across %d classes from split '%s'",
-        len(dataset),
-        len(dataset.classes),
+        len(cast(Sized, dataset)),
+        num_classes,
         args.split,
     )
 

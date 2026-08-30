@@ -266,6 +266,8 @@ class TestScriptsIntegration:
             device="cpu",
             use_amp=False,
             safe_load=True,
+            train_split="train",
+            val_split="val",
         )
 
         eval_logger = eval_script.get_logger("test_eval_pipeline")

@@ -5,14 +5,16 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from torch import nn
 from torch.utils.data import DataLoader
 
 from moliv_rl.data import (
     DataLoaderConfig,
     get_dataloaders,
     get_streaming_gameqa_datasets,
+    get_streaming_hf_datasets,
 )
-from moliv_rl.models import MODEL_REGISTRY
+from moliv_rl.models import MODEL_REGISTRY, get_model
 from moliv_rl.utils.reproducibility import seed_worker
 from scripts.utils import load_config
 
@@ -62,6 +64,18 @@ def add_data_args(parser: argparse.ArgumentParser, cfg: dict[str, Any]) -> None:
         type=str,
         default=data_cfg.get("dataset_id", "OpenMOSS-Team/GameQA-140K"),
         help="Hugging Face dataset ID for streaming mode.",
+    )
+    parser.add_argument(
+        "--image-column",
+        type=str,
+        default=data_cfg.get("image_column", "img"),
+        help="Name of the image column in the dataset.",
+    )
+    parser.add_argument(
+        "--label-column",
+        type=str,
+        default=data_cfg.get("label_column", "label"),
+        help="Name of the label column in the dataset.",
     )
     parser.add_argument(
         "--train-split",
@@ -180,8 +194,8 @@ def build_local_datasets(args: argparse.Namespace) -> tuple[Any, Any]:
 
     from moliv_rl.data.transforms import get_train_transforms, get_val_transforms
 
-    train_dir = args.data_dir / args.train_split
-    val_dir = args.data_dir / args.val_split
+    train_dir = args.data_dir / getattr(args, "train_split", "train")
+    val_dir = args.data_dir / getattr(args, "val_split", "validation")
 
     train_dataset = ImageFolder(
         root=train_dir,
@@ -196,7 +210,21 @@ def build_local_datasets(args: argparse.Namespace) -> tuple[Any, Any]:
 
 def build_streaming_datasets(args: argparse.Namespace) -> tuple[Any, Any | None]:
     """Build streaming Hugging Face datasets from args."""
-    return get_streaming_gameqa_datasets(
+    dataset_id = getattr(args, "dataset_id", "OpenMOSS-Team/GameQA-140K")
+
+    if dataset_id == "OpenMOSS-Team/GameQA-140K":
+        return get_streaming_gameqa_datasets(
+            image_size=args.image_size,
+            train_split=args.train_split,
+            val_split=args.val_split,
+            max_train_samples=args.max_train_samples,
+            max_val_samples=args.max_val_samples,
+        )
+
+    return get_streaming_hf_datasets(
+        dataset_id=dataset_id,
+        image_column=getattr(args, "image_column", "img"),
+        label_column=getattr(args, "label_column", "label"),
         image_size=args.image_size,
         train_split=args.train_split,
         val_split=args.val_split,
@@ -245,3 +273,39 @@ def build_dataloaders(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
     )
+
+
+def build_model(args: argparse.Namespace, device: torch.device) -> nn.Module:
+    r"""build_model(args, device) -> nn.Module
+
+    Construct the configured model and move it to ``device``.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI arguments containing model config.
+        device (torch.device): Target compute device.
+
+    Returns:
+        nn.Module: Instantiated model on ``device``.
+    """
+    pretrained_model_names = {"mobilenetv3_pretrained"}
+    if args.model_name in pretrained_model_names:
+        model_kwargs: dict[str, Any] = {
+            "num_classes": args.num_classes,
+        }
+    else:
+        model_kwargs = {
+            "block_dims": args.block_dims,
+            "in_channels": args.in_channels,
+            "out_channels": args.out_channels,
+            "patch_size": args.patch_size,
+            "dropout": args.dropout,
+        }
+        if args.model_name == "classification_model":
+            model_kwargs["num_classes"] = args.num_classes
+
+    model = get_model(
+        model_name=args.model_name,
+        optimize=args.optimize_model,
+        **model_kwargs,
+    )
+    return model.to(device)

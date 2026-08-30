@@ -1,0 +1,73 @@
+# CIFAR-10 CPU training configuration using a pretrained MobileNetV3 backbone.
+
+project:
+  name: "moliv_rl"
+  seed: 42069
+
+paths:
+  data_dir: "data"
+  checkpoint_dir: "checkpoints"
+  results_dir: "results"
+  metrics_file: null
+  plots_dir: null
+
+data:
+  dataset_type: "streaming"
+  dataset_id: "uoft-cs/cifar10"
+  image_column: "img"
+  label_column: "label"
+  train_split: "train"
+  validation_split: "test"
+  image_size: 32
+  batch_size: 32
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  max_train_samples: 50000
+  max_val_samples: 10000
+
+model:
+  name: "mobilenetv3_pretrained"
+  num_classes: 10
+  optimize: false
+
+optimizer:
+  name: "adamw"
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  momentum: 0.9
+
+scheduler:
+  name: "cosine_annealing"
+  interval: "epoch"
+  eta_min: 0.0
+
+loss:
+  name: "cross_entropy"
+  label_smoothing: 0.0
+
+training:
+  mode: "classification"
+  epochs: 10
+  gradient_accumulation_steps: 1
+  use_amp: false
+  precision_average: "macro"
+  num_views: 2
+  use_probe: true
+
+sigreg:
+  enabled: false
+  weight: 0.01
+  sketch_dim: 64
+  num_integration_points: 17
+  integration_t_max: 3.0
+  type: "strong"
+
+projector:
+  hidden_dim: 2048
+  out_dim: 128
+
+runtime:
+  device: "cpu"
+  save_best: true
+  save_last: true

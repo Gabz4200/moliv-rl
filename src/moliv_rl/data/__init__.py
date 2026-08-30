@@ -7,6 +7,7 @@ from .dataset import (
     get_dataloaders,
     get_default_datasets,
     get_streaming_gameqa_datasets,
+    get_streaming_hf_datasets,
 )
 from .transforms import (
     IMAGENET_MEAN,
@@ -24,6 +25,7 @@ __all__ = [
     "get_dataloaders",
     "get_default_datasets",
     "get_streaming_gameqa_datasets",
+    "get_streaming_hf_datasets",
     "get_train_transforms",
     "get_val_transforms",
 ]
